@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -101,6 +101,43 @@ WHERE NOT EXISTS (
       AND newer.video_id = d.video_id
       AND newer.id > d.id
 );
+
+CREATE TABLE IF NOT EXISTS metadata_observations (
+    id INTEGER PRIMARY KEY,
+    video_id TEXT NOT NULL REFERENCES videos(video_id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('found', 'not_found', 'error')),
+    exact_match INTEGER NOT NULL DEFAULT 1 CHECK(exact_match IN (0, 1)),
+    title TEXT,
+    description TEXT,
+    channel_id TEXT,
+    channel TEXT,
+    uploader TEXT,
+    uploader_id TEXT,
+    duration REAL,
+    view_count INTEGER,
+    upload_date TEXT,
+    timestamp REAL,
+    availability TEXT,
+    source_url TEXT,
+    raw_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_observations_video_source
+    ON metadata_observations(video_id, source, id);
+
+CREATE VIEW IF NOT EXISTS preferred_metadata AS
+SELECT m.*
+FROM metadata_observations AS m
+WHERE m.status = 'found'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM metadata_observations AS newer
+      WHERE newer.video_id = m.video_id
+        AND newer.status = 'found'
+        AND newer.id > m.id
+  );
 """
 
 MIGRATION_1_TO_2 = """
@@ -150,6 +187,45 @@ WHERE NOT EXISTS (
 );
 """
 
+MIGRATION_2_TO_3 = """
+CREATE TABLE IF NOT EXISTS metadata_observations (
+    id INTEGER PRIMARY KEY,
+    video_id TEXT NOT NULL REFERENCES videos(video_id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('found', 'not_found', 'error')),
+    exact_match INTEGER NOT NULL DEFAULT 1 CHECK(exact_match IN (0, 1)),
+    title TEXT,
+    description TEXT,
+    channel_id TEXT,
+    channel TEXT,
+    uploader TEXT,
+    uploader_id TEXT,
+    duration REAL,
+    view_count INTEGER,
+    upload_date TEXT,
+    timestamp REAL,
+    availability TEXT,
+    source_url TEXT,
+    raw_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_observations_video_source
+    ON metadata_observations(video_id, source, id);
+
+CREATE VIEW IF NOT EXISTS preferred_metadata AS
+SELECT m.*
+FROM metadata_observations AS m
+WHERE m.status = 'found'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM metadata_observations AS newer
+      WHERE newer.video_id = m.video_id
+        AND newer.status = 'found'
+        AND newer.id > m.id
+  );
+"""
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
@@ -189,7 +265,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     if version == 1:
         with conn:
             conn.executescript(MIGRATION_1_TO_2)
-            conn.execute("PRAGMA user_version = 2")
+            conn.executescript(MIGRATION_2_TO_3)
+            conn.execute("PRAGMA user_version = 3")
+        return
+
+    if version == 2:
+        with conn:
+            conn.executescript(MIGRATION_2_TO_3)
+            conn.execute("PRAGMA user_version = 3")
         return
 
     if version != SCHEMA_VERSION:

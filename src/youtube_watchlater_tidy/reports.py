@@ -42,6 +42,34 @@ def latest_snapshot_id(conn: sqlite3.Connection) -> int:
     return int(row["id"])
 
 
+def _effective_rows(
+    conn: sqlite3.Connection,
+    snapshot_id: int,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT e.position, e.video_id, e.title,
+               COALESCE(e.channel_id, m.channel_id) AS channel_id,
+               COALESCE(e.channel, m.channel) AS channel,
+               COALESCE(e.uploader, m.uploader) AS uploader,
+               COALESCE(e.uploader_id, m.uploader_id) AS uploader_id,
+               COALESCE(e.duration, m.duration) AS duration,
+               COALESCE(e.view_count, m.view_count) AS view_count,
+               COALESCE(e.availability, m.availability) AS availability,
+               d.action AS current_action,
+               d.destination_playlist
+        FROM snapshot_entries AS e
+        LEFT JOIN preferred_metadata AS m
+          ON m.video_id = e.video_id
+        LEFT JOIN current_decisions AS d
+          ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
+        WHERE e.snapshot_id = ?
+        ORDER BY e.position
+        """,
+        (snapshot_id,),
+    ).fetchall()
+
+
 def creator_rows(
     conn: sqlite3.Connection,
     snapshot_id: int | None = None,
@@ -51,18 +79,7 @@ def creator_rows(
     if snapshot_id is None:
         snapshot_id = latest_snapshot_id(conn)
 
-    rows = conn.execute(
-        """
-        SELECT e.position, e.channel_id, e.channel, e.uploader, e.uploader_id,
-               e.duration, e.view_count, d.action AS current_action
-        FROM snapshot_entries AS e
-        LEFT JOIN current_decisions AS d
-          ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
-        WHERE e.snapshot_id = ?
-        ORDER BY e.position
-        """,
-        (snapshot_id,),
-    ).fetchall()
+    rows = _effective_rows(conn, snapshot_id)
 
     if remaining:
         rows = [row for row in rows if row["current_action"] in (None, "clear")]
@@ -136,20 +153,7 @@ def video_rows(
     if snapshot_id is None:
         snapshot_id = latest_snapshot_id(conn)
 
-    rows = conn.execute(
-        """
-        SELECT e.position, e.video_id, e.title, e.channel_id, e.channel,
-               e.uploader, e.uploader_id, e.duration, e.view_count,
-               e.availability, d.action AS current_action,
-               d.destination_playlist
-        FROM snapshot_entries AS e
-        LEFT JOIN current_decisions AS d
-          ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
-        WHERE e.snapshot_id = ?
-        ORDER BY e.position
-        """,
-        (snapshot_id,),
-    ).fetchall()
+    rows = _effective_rows(conn, snapshot_id)
 
     result: list[VideoRow] = []
     for row in rows:

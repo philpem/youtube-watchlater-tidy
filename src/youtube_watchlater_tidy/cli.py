@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .db import open_catalogue
+from .enrichment import candidate_video_ids, enrich_with_ytdlp
 from .importer import import_watchlater_json
 from .reports import (
     creator_rows,
@@ -81,7 +82,41 @@ def _build_parser() -> argparse.ArgumentParser:
     videos_parser.add_argument(
         "--unknown-creator",
         action="store_true",
-        help="only entries with no channel/uploader id or name in the imported metadata",
+        help="only entries with no channel/uploader id or name in the effective metadata",
+    )
+
+    enrich_parser = subparsers.add_parser(
+        "enrich",
+        help="fetch richer metadata for selected catalogue entries",
+    )
+    enrich_target = enrich_parser.add_mutually_exclusive_group(required=True)
+    enrich_target.add_argument(
+        "--missing-creator",
+        action="store_true",
+        help="enrich live entries whose flat-playlist metadata has no creator identity",
+    )
+    enrich_target.add_argument("--video-id", help="enrich one video id from the snapshot")
+    enrich_parser.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
+    enrich_parser.add_argument("--limit", type=int, help="maximum number of videos to fetch")
+    enrich_parser.add_argument(
+        "--yt-dlp",
+        default="yt-dlp",
+        help="yt-dlp executable (default: yt-dlp)",
+    )
+    enrich_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="fetch even when a successful yt-dlp observation is already cached",
+    )
+    enrich_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show video ids that would be enriched without making network requests",
+    )
+    enrich_parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="disable the tqdm progress bar",
     )
 
     select_parser = subparsers.add_parser("select", help="create and preview a cohort selection")
@@ -171,6 +206,42 @@ def _cmd_videos(args: argparse.Namespace) -> int:
         )
     print(render_videos(rows, args.limit))
     return 0
+
+
+def _cmd_enrich(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        video_ids = candidate_video_ids(
+            conn,
+            args.snapshot,
+            missing_creator=args.missing_creator,
+            video_id=args.video_id,
+            limit=args.limit,
+            refresh=args.refresh,
+        )
+
+        if args.dry_run:
+            for video_id in video_ids:
+                print(video_id)
+            print(f"{len(video_ids)} video(s) would be enriched")
+            return 0
+
+        if not video_ids:
+            print("No videos need enrichment.")
+            return 0
+
+        print(f"Enriching {len(video_ids)} video(s) with yt-dlp...", flush=True)
+        result = enrich_with_ytdlp(
+            conn,
+            video_ids,
+            yt_dlp=args.yt_dlp,
+            show_progress=not args.no_progress,
+        )
+
+    print(
+        f"Enrichment complete: {result.found} found, {result.failed} failed "
+        f"({result.attempted} attempted)"
+    )
+    return 0 if result.failed == 0 else 1
 
 
 def _render_selection(rows: list, limit: int | None = None) -> str:
@@ -283,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_creators(args)
         if args.command == "videos":
             return _cmd_videos(args)
+        if args.command == "enrich":
+            return _cmd_enrich(args)
         if args.command == "select":
             return _cmd_select(args)
         if args.command == "selection":

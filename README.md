@@ -27,6 +27,29 @@ watchlater videos --unknown-creator --remaining
 
 For YouTube in particular, make sure the export was produced with a recent yt-dlp: a flat-playlist channel/uploader metadata regression was fixed upstream in June 2026. Re-exporting with a current build may recover missing creator metadata without doing slower per-video enrichment.
 
+### Repair missing live-video metadata
+
+If current yt-dlp still leaves creator metadata blank for otherwise-live videos, selectively run full extraction only for those entries:
+
+```bash
+watchlater enrich --missing-creator --dry-run
+watchlater enrich --missing-creator
+```
+
+This invokes `yt-dlp --skip-download --dump-single-json` for the selected videos. The command reports the candidate count immediately and shows a `tqdm` progress bar with the current video and running found/failed totals. Use `--no-progress` to suppress the progress bar.
+
+The original imported snapshot is not changed. Richer metadata is stored as a separate observation with provenance and is then used by creator/video reports and creator cohort selection where the snapshot has gaps.
+
+Successful yt-dlp observations are cached. Use `--refresh` to fetch them again, `--limit N` to cap a run, or target one known video explicitly:
+
+```bash
+watchlater enrich --missing-creator --limit 10
+watchlater enrich --video-id zquMVVCnmuk
+watchlater enrich --video-id zquMVVCnmuk --refresh
+```
+
+Private/deleted markers are excluded from `--missing-creator`; historical archive recovery for those entries is handled separately.
+
 ## Current CLI
 
 Install the package and import one or more exports into a local SQLite catalogue. Each export is kept as a separate snapshot.

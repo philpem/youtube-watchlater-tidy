@@ -54,11 +54,18 @@ def _rows_for_snapshot(
 ) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT e.position, e.video_id, e.title, e.channel_id, e.channel,
-               e.uploader, e.uploader_id, e.duration, e.view_count,
+        SELECT e.position, e.video_id, e.title,
+               COALESCE(e.channel_id, m.channel_id) AS channel_id,
+               COALESCE(e.channel, m.channel) AS channel,
+               COALESCE(e.uploader, m.uploader) AS uploader,
+               COALESCE(e.uploader_id, m.uploader_id) AS uploader_id,
+               COALESCE(e.duration, m.duration) AS duration,
+               COALESCE(e.view_count, m.view_count) AS view_count,
                d.action AS current_action,
                d.destination_playlist
         FROM snapshot_entries AS e
+        LEFT JOIN preferred_metadata AS m
+          ON m.video_id = e.video_id
         LEFT JOIN current_decisions AS d
           ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
         WHERE e.snapshot_id = ?
@@ -259,12 +266,19 @@ def selection_rows(
         selection_id = latest_selection_id(conn, snapshot_id)
     rows = conn.execute(
         """
-        SELECT e.position, e.video_id, e.title, e.channel_id, e.channel, e.uploader,
-               e.duration, d.action AS current_action, d.destination_playlist
+        SELECT e.position, e.video_id, e.title,
+               COALESCE(e.channel_id, m.channel_id) AS channel_id,
+               COALESCE(e.channel, m.channel) AS channel,
+               COALESCE(e.uploader, m.uploader) AS uploader,
+               COALESCE(e.duration, m.duration) AS duration,
+               d.action AS current_action,
+               d.destination_playlist
         FROM selections AS s
         JOIN selection_entries AS se ON se.selection_id = s.id
         JOIN snapshot_entries AS e
           ON e.snapshot_id = s.snapshot_id AND e.video_id = se.video_id
+        LEFT JOIN preferred_metadata AS m
+          ON m.video_id = e.video_id
         LEFT JOIN current_decisions AS d
           ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
         WHERE s.id = ?
