@@ -113,7 +113,7 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(rows[0].title, "Mystery video")
         self.assertEqual(rows[0].view_count, 12345)
 
-    def test_schema_v1_migrates_to_v2(self) -> None:
+    def test_schema_v1_migrates_to_current_version(self) -> None:
         old = self.root / "old.sqlite3"
         conn = sqlite3.connect(old)
         conn.row_factory = sqlite3.Row
@@ -125,11 +125,14 @@ class TriageTests(unittest.TestCase):
         """)
         ensure_schema(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         conn.close()
-        self.assertEqual(version, 2)
-        self.assertIn("decision_events", tables)
-        self.assertIn("selections", tables)
+        self.assertEqual(version, 4)
+        self.assertIn("decision_events", objects)
+        self.assertIn("selections", objects)
+        self.assertIn("metadata_observations", objects)
+        self.assertIn("preferred_metadata", objects)
+        self.assertIn("archive_lookups", objects)
 
 
 if __name__ == "__main__":

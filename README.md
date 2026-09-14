@@ -27,6 +27,69 @@ watchlater videos --unknown-creator --remaining
 
 For YouTube in particular, make sure the export was produced with a recent yt-dlp: a flat-playlist channel/uploader metadata regression was fixed upstream in June 2026. Re-exporting with a current build may recover missing creator metadata without doing slower per-video enrichment.
 
+### Repair missing live-video metadata
+
+If current yt-dlp still leaves creator metadata blank for otherwise-live videos, selectively run full extraction only for those entries:
+
+```bash
+watchlater enrich --missing-creator --dry-run
+watchlater enrich --missing-creator
+```
+
+This invokes `yt-dlp --skip-download --dump-single-json` for the selected videos. The command reports the candidate count immediately and shows a `tqdm` progress bar with the current video and running found/failed totals. Use `--no-progress` to suppress the progress bar.
+
+The original imported snapshot is not changed. Richer metadata is stored as a separate observation with provenance and is then used by creator/video reports and creator cohort selection where the snapshot has gaps.
+
+Successful yt-dlp observations are cached. Use `--refresh` to fetch them again, `--limit N` to cap a run, or target one known video explicitly:
+
+```bash
+watchlater enrich --missing-creator --limit 10
+watchlater enrich --video-id zquMVVCnmuk
+watchlater enrich --video-id zquMVVCnmuk --refresh
+```
+
+Private/deleted markers are excluded from `--missing-creator`.
+
+### Recover deleted/private videos from public archives
+
+The surviving YouTube video ID can be checked against the FindYouTubeVideo v5 service, which federates several archive/index sources. Start with a dry run if desired:
+
+```bash
+watchlater recover --unavailable --dry-run
+watchlater recover --unavailable
+```
+
+Recovery uses exact video IDs only. Found and not-found results are cached so repeated runs do not re-query the service unnecessarily; use `--refresh` to force a new lookup. Long batches show a `tqdm` progress bar and can be capped with `--limit`:
+
+```bash
+watchlater recover --unavailable --limit 10
+watchlater recover --video-id NTY0d9KM0Hw
+```
+
+The federated response is preserved verbatim in the local catalogue together with its verdict and archive links. Inspect a cached result without making another network request using:
+
+```bash
+watchlater recovery NTY0d9KM0Hw
+watchlater recovery NTY0d9KM0Hw --raw
+```
+
+Metadata recovery is attempted in increasing-cost order:
+
+1. Filmot raw metadata already carried inside the FindYouTubeVideo response.
+2. One metadata-only PreserveTube API request, but only when FindYouTubeVideo says PreserveTube has a copy and Filmot yielded nothing.
+3. The specific archived Wayback watch page already discovered by FindYouTubeVideo, parsed for `ytInitialPlayerResponse` data and older YouTube meta tags.
+
+Those sources can recover title, description, channel name/ID, upload/published date and, where available, duration and view count. Imported `[Private video]` / `[Deleted video]` snapshot rows remain unchanged; recovered data is stored separately with source provenance and only fills gaps in the effective catalogue view.
+
+This means recovered videos can immediately participate in the cheap triage workflow:
+
+```bash
+watchlater creators --remaining
+watchlater select title --contains "recovered phrase" --remaining
+```
+
+Further recovery work can add other archive/index sources for entries where these three stages still cannot identify the video.
+
 ## Current CLI
 
 Install the package and import one or more exports into a local SQLite catalogue. Each export is kept as a separate snapshot.
@@ -139,8 +202,6 @@ Open <https://www.youtube.com/playlist?list=WL>, open the browser developer cons
             console.log(`Removed ${removed} item(s)...`);
         }
 
-        // Be deliberately conservative so the page has time to update and so
-        // we do not hammer YouTube's UI as quickly as JavaScript can run.
         await sleep(750);
     }
 })();
