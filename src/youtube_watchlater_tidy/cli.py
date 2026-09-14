@@ -92,6 +92,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="only entries with no channel/uploader id or name in the effective metadata",
     )
+    videos_parser.add_argument(
+        "--unavailable",
+        action="store_true",
+        help="only source entries originally exported as [Private video] or [Deleted video]",
+    )
+    recovery_state = videos_parser.add_mutually_exclusive_group()
+    recovery_state.add_argument(
+        "--recovered",
+        action="store_true",
+        help="only entries with successful enriched/recovered metadata",
+    )
+    recovery_state.add_argument(
+        "--unrecovered",
+        action="store_true",
+        help="only entries with no successful enriched/recovered metadata",
+    )
 
     enrich_parser = subparsers.add_parser(
         "enrich",
@@ -256,12 +272,15 @@ def _cmd_creators(args: argparse.Namespace) -> int:
 
 
 def _cmd_videos(args: argparse.Namespace) -> int:
+    recovered = True if args.recovered else False if args.unrecovered else None
     with open_catalogue(args.db) as conn:
         rows = video_rows(
             conn,
             args.snapshot,
             remaining=args.remaining,
             unknown_creator=args.unknown_creator,
+            unavailable=args.unavailable,
+            recovered=recovered,
         )
     print(render_videos(rows, args.limit))
     return 0
