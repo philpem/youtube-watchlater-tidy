@@ -19,9 +19,17 @@ Change `firefox` to the browser/profile source you use if necessary.
 
 Keep the resulting JSON as a backup before deleting anything from YouTube.
 
+`--flat-playlist` deliberately avoids extracting every video individually, so some entry metadata can be absent. If a creator report contains a large `(unknown)` cohort, inspect the individual entries with:
+
+```bash
+watchlater videos --unknown-creator --remaining
+```
+
+For YouTube in particular, make sure the export was produced with a recent yt-dlp: a flat-playlist channel/uploader metadata regression was fixed upstream in June 2026. Re-exporting with a current build may recover missing creator metadata without doing slower per-video enrichment.
+
 ## Current CLI
 
-The first implementation imports one or more exports into a local SQLite catalogue while preserving each export as a separate snapshot.
+Install the package and import one or more exports into a local SQLite catalogue. Each export is kept as a separate snapshot.
 
 ```bash
 python -m venv .venv
@@ -35,7 +43,44 @@ watchlater creators --limit 30
 
 By default the catalogue is stored in `watchlater.sqlite3`; use `--db PATH` before the subcommand to choose another location.
 
-The `creators` report is intentionally read-only at this stage. It groups primarily by stable YouTube channel ID so that renamed channels remain one cohort. Later work will add cohort decisions, playlist moves, DeArrow enrichment and LLM classification.
+Creator grouping primarily uses stable YouTube channel IDs so renamed channels remain one cohort.
+
+### Successive cohort triage
+
+Cheap/manual classification is intended to happen before LLM work. Start with the largest creators, select an obvious cohort, record an action, then ask for the unresolved remainder again:
+
+```bash
+watchlater creators --remaining
+
+# Prefer the stable channel ID shown by the creators report.
+watchlater select creator UCo ... --remaining
+watchlater selection show
+watchlater selection action move --playlist "Queue - Electronics"
+
+watchlater creators --remaining
+```
+
+You can also select by title substring or regular expression:
+
+```bash
+watchlater select title --contains "Super Mario" --remaining
+watchlater selection action move --playlist "Queue - Games"
+
+watchlater select title --regex 'conference|keynote' --remaining --max-duration 2h
+watchlater selection action review
+```
+
+Selection filters include `--min-duration`, `--max-duration`, `--min-position` and `--max-position`. Durations accept seconds or suffixes such as `90s`, `15m`, `1.5h` and `2d`.
+
+Actions are local catalogue decisions only at this stage; they do **not** mutate YouTube. Supported actions are `keep`, `review`, `archive`, `delete`, and `move`. A move records its intended destination playlist for later synchronisation.
+
+Decisions are append-only history. Re-actioning a selected cohort supersedes its current decision without deleting the old event, and this makes it unresolved again while preserving history:
+
+```bash
+watchlater selection undo
+```
+
+`watchlater creators` shows current action counts and unresolved counts. `watchlater creators --remaining` excludes videos with a current decision, which supports successive refinement.
 
 ## Quick console method: clear the whole Watch Later playlist
 
@@ -101,4 +146,4 @@ Open <https://www.youtube.com/playlist?list=WL>, open the browser developer cons
 })();
 ```
 
-For selective cleanup, use the Python tooling planned in the repository issues instead of this all-or-nothing script.
+For selective cleanup, use the Python tooling instead of this all-or-nothing script.

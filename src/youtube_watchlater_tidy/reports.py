@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import statistics
+from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -12,11 +13,26 @@ class CreatorRow:
     channel_id: str | None
     name: str
     count: int
+    unresolved_count: int
+    action_counts: dict[str, int]
     total_duration: float
     median_duration: float | None
     median_views: float | None
     first_position: int
     last_position: int
+
+
+@dataclass(frozen=True)
+class VideoRow:
+    position: int
+    video_id: str
+    title: str
+    creator: str
+    duration: float | None
+    view_count: int | None
+    availability: str | None
+    current_action: str | None
+    destination_playlist: str | None
 
 
 def latest_snapshot_id(conn: sqlite3.Connection) -> int:
@@ -29,19 +45,27 @@ def latest_snapshot_id(conn: sqlite3.Connection) -> int:
 def creator_rows(
     conn: sqlite3.Connection,
     snapshot_id: int | None = None,
+    *,
+    remaining: bool = False,
 ) -> list[CreatorRow]:
     if snapshot_id is None:
         snapshot_id = latest_snapshot_id(conn)
 
     rows = conn.execute(
         """
-        SELECT position, channel_id, channel, uploader, uploader_id, duration, view_count
-        FROM snapshot_entries
-        WHERE snapshot_id = ?
-        ORDER BY position
+        SELECT e.position, e.channel_id, e.channel, e.uploader, e.uploader_id,
+               e.duration, e.view_count, d.action AS current_action
+        FROM snapshot_entries AS e
+        LEFT JOIN current_decisions AS d
+          ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
+        WHERE e.snapshot_id = ?
+        ORDER BY e.position
         """,
         (snapshot_id,),
     ).fetchall()
+
+    if remaining:
+        rows = [row for row in rows if row["current_action"] in (None, "clear")]
 
     grouped: dict[str, dict[str, object]] = {}
     for row in rows:
@@ -60,6 +84,7 @@ def creator_rows(
                 "positions": [],
                 "durations": [],
                 "views": [],
+                "actions": [],
             },
         )
         group["positions"].append(int(row["position"]))  # type: ignore[union-attr]
@@ -67,21 +92,28 @@ def creator_rows(
             group["durations"].append(float(row["duration"]))  # type: ignore[union-attr]
         if row["view_count"] is not None:
             group["views"].append(int(row["view_count"]))  # type: ignore[union-attr]
+        action = row["current_action"]
+        group["actions"].append(None if action == "clear" else action)  # type: ignore[union-attr]
 
     result: list[CreatorRow] = []
     for key, group in grouped.items():
         positions = group["positions"]
         durations = group["durations"]
         views = group["views"]
+        actions = group["actions"]
         assert isinstance(positions, list)
         assert isinstance(durations, list)
         assert isinstance(views, list)
+        assert isinstance(actions, list)
+        action_counts = Counter(action for action in actions if action is not None)
         result.append(
             CreatorRow(
                 creator_key=key,
                 channel_id=group["channel_id"] if isinstance(group["channel_id"], str) else None,
                 name=str(group["name"]),
                 count=len(positions),
+                unresolved_count=sum(action is None for action in actions),
+                action_counts=dict(action_counts),
                 total_duration=sum(durations),
                 median_duration=statistics.median(durations) if durations else None,
                 median_views=statistics.median(views) if views else None,
@@ -91,6 +123,58 @@ def creator_rows(
         )
 
     result.sort(key=lambda item: (-item.count, -item.total_duration, item.name.casefold()))
+    return result
+
+
+def video_rows(
+    conn: sqlite3.Connection,
+    snapshot_id: int | None = None,
+    *,
+    remaining: bool = False,
+    unknown_creator: bool = False,
+) -> list[VideoRow]:
+    if snapshot_id is None:
+        snapshot_id = latest_snapshot_id(conn)
+
+    rows = conn.execute(
+        """
+        SELECT e.position, e.video_id, e.title, e.channel_id, e.channel,
+               e.uploader, e.uploader_id, e.duration, e.view_count,
+               e.availability, d.action AS current_action,
+               d.destination_playlist
+        FROM snapshot_entries AS e
+        LEFT JOIN current_decisions AS d
+          ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
+        WHERE e.snapshot_id = ?
+        ORDER BY e.position
+        """,
+        (snapshot_id,),
+    ).fetchall()
+
+    result: list[VideoRow] = []
+    for row in rows:
+        action = None if row["current_action"] == "clear" else row["current_action"]
+        if remaining and action is not None:
+            continue
+        has_creator = any(
+            isinstance(row[field], str) and row[field].strip()
+            for field in ("channel_id", "uploader_id", "channel", "uploader")
+        )
+        if unknown_creator and has_creator:
+            continue
+        result.append(
+            VideoRow(
+                position=int(row["position"]),
+                video_id=str(row["video_id"]),
+                title=row["title"] or "(untitled)",
+                creator=row["channel"] or row["uploader"] or "(unknown)",
+                duration=float(row["duration"]) if row["duration"] is not None else None,
+                view_count=int(row["view_count"]) if row["view_count"] is not None else None,
+                availability=row["availability"],
+                current_action=action,
+                destination_playlist=row["destination_playlist"],
+            )
+        )
     return result
 
 
@@ -110,31 +194,19 @@ def format_duration(seconds: float | None) -> str:
     return f"{secs}s"
 
 
-def _fmt_views(value: float | None) -> str:
+def _fmt_views(value: float | int | None) -> str:
     if value is None:
         return "-"
     return f"{int(value):,}"
 
 
-def render_creators(rows: Iterable[CreatorRow], limit: int | None = None) -> str:
-    rows = list(rows)
-    if limit is not None:
-        rows = rows[:limit]
+def _fmt_actions(actions: dict[str, int]) -> str:
+    if not actions:
+        return "-"
+    return ",".join(f"{key}:{actions[key]}" for key in sorted(actions))
 
-    headers = ["Count", "Total", "Median", "Median views", "Positions", "Creator", "Channel ID"]
-    data = [
-        [
-            str(row.count),
-            format_duration(row.total_duration),
-            format_duration(row.median_duration),
-            _fmt_views(row.median_views),
-            f"{row.first_position}-{row.last_position}",
-            row.name,
-            row.channel_id or "-",
-        ]
-        for row in rows
-    ]
 
+def _table(headers: list[str], data: list[list[str]]) -> str:
     widths = [len(header) for header in headers]
     for item in data:
         for i, value in enumerate(item):
@@ -146,3 +218,60 @@ def render_creators(rows: Iterable[CreatorRow], limit: int | None = None) -> str
     output = [line(headers), line(["-" * width for width in widths])]
     output.extend(line(item) for item in data)
     return "\n".join(output)
+
+
+def render_creators(rows: Iterable[CreatorRow], limit: int | None = None) -> str:
+    rows = list(rows)
+    if limit is not None:
+        rows = rows[:limit]
+
+    headers = [
+        "Count", "Unresolved", "Total", "Median", "Median views",
+        "Positions", "Actions", "Creator", "Channel ID",
+    ]
+    data = [
+        [
+            str(row.count),
+            str(row.unresolved_count),
+            format_duration(row.total_duration),
+            format_duration(row.median_duration),
+            _fmt_views(row.median_views),
+            f"{row.first_position}-{row.last_position}",
+            _fmt_actions(row.action_counts),
+            row.name,
+            row.channel_id or "-",
+        ]
+        for row in rows
+    ]
+    return _table(headers, data)
+
+
+def render_videos(rows: Iterable[VideoRow], limit: int | None = None) -> str:
+    rows = list(rows)
+    total = len(rows)
+    if limit is not None:
+        rows = rows[:limit]
+
+    headers = ["Pos", "Duration", "Views", "Availability", "Action", "Creator", "Title", "Video ID"]
+    data: list[list[str]] = []
+    for row in rows:
+        action = row.current_action or "-"
+        if row.destination_playlist:
+            action = f"{action}->{row.destination_playlist}"
+        data.append(
+            [
+                str(row.position),
+                format_duration(row.duration),
+                _fmt_views(row.view_count),
+                row.availability or "-",
+                action,
+                row.creator,
+                row.title,
+                row.video_id,
+            ]
+        )
+    output = _table(headers, data)
+    if limit is not None and total > limit:
+        output += f"\n... {total - limit} more"
+    output += f"\n{total} video(s)"
+    return output
