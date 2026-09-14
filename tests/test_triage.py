@@ -127,11 +127,12 @@ class TriageTests(unittest.TestCase):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         conn.close()
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 4)
         self.assertIn("decision_events", objects)
         self.assertIn("selections", objects)
         self.assertIn("metadata_observations", objects)
         self.assertIn("preferred_metadata", objects)
+        self.assertIn("archive_lookups", objects)
 
 
 if __name__ == "__main__":

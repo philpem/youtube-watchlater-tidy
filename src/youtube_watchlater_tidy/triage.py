@@ -54,7 +54,13 @@ def _rows_for_snapshot(
 ) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT e.position, e.video_id, e.title,
+        SELECT e.position, e.video_id,
+               CASE
+                   WHEN e.title IN ('[Private video]', '[Deleted video]')
+                        AND m.title IS NOT NULL
+                   THEN m.title
+                   ELSE e.title
+               END AS title,
                COALESCE(e.channel_id, m.channel_id) AS channel_id,
                COALESCE(e.channel, m.channel) AS channel,
                COALESCE(e.uploader, m.uploader) AS uploader,
@@ -145,9 +151,6 @@ def select_creator(
         snapshot_id = latest_snapshot_id(conn)
     rows = _rows_for_snapshot(conn, snapshot_id, remaining=remaining)
 
-    # Prefer an exact stable creator key. Only fall back to display names if no
-    # key matches, and reject ambiguous display names rather than silently
-    # combining unrelated channels.
     exact_key_rows = [row for row in rows if _creator_key(row) == creator]
     if exact_key_rows:
         matched = exact_key_rows
@@ -266,7 +269,13 @@ def selection_rows(
         selection_id = latest_selection_id(conn, snapshot_id)
     rows = conn.execute(
         """
-        SELECT e.position, e.video_id, e.title,
+        SELECT e.position, e.video_id,
+               CASE
+                   WHEN e.title IN ('[Private video]', '[Deleted video]')
+                        AND m.title IS NOT NULL
+                   THEN m.title
+                   ELSE e.title
+               END AS title,
                COALESCE(e.channel_id, m.channel_id) AS channel_id,
                COALESCE(e.channel, m.channel) AS channel,
                COALESCE(e.uploader, m.uploader) AS uploader,

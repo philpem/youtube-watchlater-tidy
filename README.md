@@ -48,7 +48,47 @@ watchlater enrich --video-id zquMVVCnmuk
 watchlater enrich --video-id zquMVVCnmuk --refresh
 ```
 
-Private/deleted markers are excluded from `--missing-creator`; historical archive recovery for those entries is handled separately.
+Private/deleted markers are excluded from `--missing-creator`.
+
+### Recover deleted/private videos from public archives
+
+The surviving YouTube video ID can be checked against the FindYouTubeVideo v5 service, which federates several archive/index sources. Start with a dry run if desired:
+
+```bash
+watchlater recover --unavailable --dry-run
+watchlater recover --unavailable
+```
+
+Recovery uses exact video IDs only. Found and not-found results are cached so repeated runs do not re-query the service unnecessarily; use `--refresh` to force a new lookup. Long batches show a `tqdm` progress bar and can be capped with `--limit`:
+
+```bash
+watchlater recover --unavailable --limit 10
+watchlater recover --video-id NTY0d9KM0Hw
+```
+
+The federated response is preserved verbatim in the local catalogue together with its verdict and archive links. Inspect a cached result without making another network request using:
+
+```bash
+watchlater recovery NTY0d9KM0Hw
+watchlater recovery NTY0d9KM0Hw --raw
+```
+
+Metadata recovery is attempted in increasing-cost order:
+
+1. Filmot raw metadata already carried inside the FindYouTubeVideo response.
+2. One metadata-only PreserveTube API request, but only when FindYouTubeVideo says PreserveTube has a copy and Filmot yielded nothing.
+3. The specific archived Wayback watch page already discovered by FindYouTubeVideo, parsed for `ytInitialPlayerResponse` data and older YouTube meta tags.
+
+Those sources can recover title, description, channel name/ID, upload/published date and, where available, duration and view count. Imported `[Private video]` / `[Deleted video]` snapshot rows remain unchanged; recovered data is stored separately with source provenance and only fills gaps in the effective catalogue view.
+
+This means recovered videos can immediately participate in the cheap triage workflow:
+
+```bash
+watchlater creators --remaining
+watchlater select title --contains "recovered phrase" --remaining
+```
+
+Further recovery work can add other archive/index sources for entries where these three stages still cannot identify the video.
 
 ## Current CLI
 
@@ -162,8 +202,6 @@ Open <https://www.youtube.com/playlist?list=WL>, open the browser developer cons
             console.log(`Removed ${removed} item(s)...`);
         }
 
-        // Be deliberately conservative so the page has time to update and so
-        // we do not hammer YouTube's UI as quickly as JavaScript can run.
         await sleep(750);
     }
 })();
