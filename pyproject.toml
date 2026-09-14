@@ -9,6 +9,7 @@ description = "Tools for triaging and cleaning up a large YouTube Watch Later pl
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "beautifulsoup4>=4.12",
     "tqdm>=4.66",
 ]
 

@@ -73,7 +73,13 @@ watchlater recovery NTY0d9KM0Hw
 watchlater recovery NTY0d9KM0Hw --raw
 ```
 
-Where the federated response includes Filmot raw metadata, the tool normalizes its title, description, channel, upload date, duration and views into the effective catalogue view. If Filmot yields nothing and FindYouTubeVideo reports a PreserveTube copy, the tool makes one direct metadata-only request to PreserveTube's API and normalizes its title, description, channel and published date. Imported `[Private video]` / `[Deleted video]` snapshot rows remain unchanged; recovered data is stored separately with source provenance.
+Metadata recovery is attempted in increasing-cost order:
+
+1. Filmot raw metadata already carried inside the FindYouTubeVideo response.
+2. One metadata-only PreserveTube API request, but only when FindYouTubeVideo says PreserveTube has a copy and Filmot yielded nothing.
+3. The specific archived Wayback watch page already discovered by FindYouTubeVideo, parsed for `ytInitialPlayerResponse` data and older YouTube meta tags.
+
+Those sources can recover title, description, channel name/ID, upload/published date and, where available, duration and view count. Imported `[Private video]` / `[Deleted video]` snapshot rows remain unchanged; recovered data is stored separately with source provenance and only fills gaps in the effective catalogue view.
 
 This means recovered videos can immediately participate in the cheap triage workflow:
 
@@ -82,7 +88,7 @@ watchlater creators --remaining
 watchlater select title --contains "recovered phrase" --remaining
 ```
 
-Further recovery work can add Wayback/watch-page parsing and other source-specific fallbacks for entries where neither Filmot nor PreserveTube can provide normalized metadata.
+Further recovery work can add other archive/index sources for entries where these three stages still cannot identify the video.
 
 ## Current CLI
 
