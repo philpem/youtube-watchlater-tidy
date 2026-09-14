@@ -1,0 +1,20 @@
+# Watch Later exports and local catalogue data contain private viewing history.
+watch-later*.json
+watchlater*.json
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated reports / exports.
+review-output/
+reports/
+
+# Python.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/

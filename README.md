@@ -19,6 +19,24 @@ Change `firefox` to the browser/profile source you use if necessary.
 
 Keep the resulting JSON as a backup before deleting anything from YouTube.
 
+## Current CLI
+
+The first implementation imports one or more exports into a local SQLite catalogue while preserving each export as a separate snapshot.
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -e .
+
+watchlater import watch-later.json
+watchlater snapshots
+watchlater creators --limit 30
+```
+
+By default the catalogue is stored in `watchlater.sqlite3`; use `--db PATH` before the subcommand to choose another location.
+
+The `creators` report is intentionally read-only at this stage. It groups primarily by stable YouTube channel ID so that renamed channels remain one cohort. Later work will add cohort decisions, playlist moves, DeArrow enrichment and LLM classification.
+
 ## Quick console method: clear the whole Watch Later playlist
 
 > [!CAUTION]
