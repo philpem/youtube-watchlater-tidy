@@ -10,11 +10,13 @@ from urllib.request import Request, urlopen
 
 from tqdm import tqdm
 
+from .enrichment import store_observation
 from .reports import latest_snapshot_id
 
 UNAVAILABLE_TITLES = {"[private video]", "[deleted video]"}
 DEFAULT_FINDYOUTUBEVIDEO_BASE = "https://findyoutubevideo.thetechrobo.ca"
 BACKEND_NAME = "findyoutubevideo-v5"
+FILMOT_SOURCE = "filmot-via-findyoutubevideo"
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ class RecoveryResult:
     found: int
     not_found: int
     failed: int
+    metadata_recovered: int
 
 
 @dataclass(frozen=True)
@@ -104,7 +107,10 @@ def _fetch_findyoutubevideo(
     base_url: str = DEFAULT_FINDYOUTUBEVIDEO_BASE,
     timeout: float = 90.0,
 ) -> dict[str, Any]:
-    api_url = f"{base_url.rstrip('/')}/api/v5/{video_id}"
+    # includeRaw lets metadata-only services such as Filmot return the actual
+    # historical metadata they used to reach their verdict.  Keeping this in
+    # the federated request avoids a second request to Filmot itself.
+    api_url = f"{base_url.rstrip('/')}/api/v5/{video_id}?includeRaw=true"
     request = Request(
         api_url,
         headers={
@@ -199,6 +205,80 @@ def _store_lookup(
         )
 
 
+def _filmot_item(data: dict[str, Any]) -> dict[str, Any] | None:
+    services = data.get("keys")
+    if not isinstance(services, list):
+        return None
+
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        identity = str(service.get("classname") or service.get("name") or "").casefold()
+        if "filmot" not in identity:
+            continue
+        raw = service.get("rawraw")
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            return raw[0]
+        if isinstance(raw, dict):
+            return raw
+    return None
+
+
+def _normalise_filmot(video_id: str, item: dict[str, Any]) -> dict[str, Any] | None:
+    title = item.get("title")
+    channel_id = item.get("channelid") or item.get("channel_id")
+    channel = item.get("channelname") or item.get("channel")
+    description = item.get("description")
+    duration = item.get("duration")
+    upload_date = item.get("uploaddate") or item.get("upload_date")
+    view_count = item.get("view_count")
+    if view_count is None:
+        view_count = item.get("viewcount")
+    if view_count is None:
+        view_count = item.get("views")
+
+    # Require at least one genuinely useful field before creating a preferred
+    # metadata observation.  rawraw sometimes contains bookkeeping only.
+    if not any(value not in (None, "") for value in (title, channel_id, channel, description)):
+        return None
+
+    return {
+        "id": video_id,
+        "title": title,
+        "description": description,
+        "channel_id": channel_id,
+        "channel": channel,
+        "uploader": channel,
+        "duration": duration,
+        "view_count": view_count,
+        "upload_date": str(upload_date) if upload_date not in (None, "") else None,
+        "webpage_url": f"https://filmot.com/video/{video_id}",
+        "_filmot_raw": item,
+    }
+
+
+def store_recovered_metadata(
+    conn: sqlite3.Connection,
+    video_id: str,
+    data: dict[str, Any],
+) -> bool:
+    item = _filmot_item(data)
+    if item is None:
+        return False
+    normalised = _normalise_filmot(video_id, item)
+    if normalised is None:
+        return False
+    store_observation(
+        conn,
+        video_id,
+        FILMOT_SOURCE,
+        "found",
+        normalised,
+        source_url=f"https://filmot.com/video/{video_id}",
+    )
+    return True
+
+
 def recover_with_findyoutubevideo(
     conn: sqlite3.Connection,
     video_ids: list[str],
@@ -211,6 +291,7 @@ def recover_with_findyoutubevideo(
     found = 0
     not_found = 0
     failed = 0
+    metadata_recovered = 0
 
     if fetcher is None:
         fetcher = lambda vid: _fetch_findyoutubevideo(
@@ -227,7 +308,10 @@ def recover_with_findyoutubevideo(
         dynamic_ncols=True,
     )
     for video_id in progress:
-        progress.set_postfix_str(f"{video_id} found={found} missing={not_found} failed={failed}")
+        progress.set_postfix_str(
+            f"{video_id} found={found} metadata={metadata_recovered} "
+            f"missing={not_found} failed={failed}"
+        )
         source_url = f"{base_url.rstrip('/')}/?q={video_id}"
         try:
             data = fetcher(video_id)
@@ -255,11 +339,15 @@ def recover_with_findyoutubevideo(
             status = "not_found"
         _store_lookup(conn, video_id, status, data, source_url=source_url)
 
+        if store_recovered_metadata(conn, video_id, data):
+            metadata_recovered += 1
+
     return RecoveryResult(
         attempted=len(video_ids),
         found=found,
         not_found=not_found,
         failed=failed,
+        metadata_recovered=metadata_recovered,
     )
 
 

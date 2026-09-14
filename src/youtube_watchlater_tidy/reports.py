@@ -48,7 +48,13 @@ def _effective_rows(
 ) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT e.position, e.video_id, e.title,
+        SELECT e.position, e.video_id,
+               CASE
+                   WHEN e.title IN ('[Private video]', '[Deleted video]')
+                        AND m.title IS NOT NULL
+                   THEN m.title
+                   ELSE e.title
+               END AS title,
                COALESCE(e.channel_id, m.channel_id) AS channel_id,
                COALESCE(e.channel, m.channel) AS channel,
                COALESCE(e.uploader, m.uploader) AS uploader,

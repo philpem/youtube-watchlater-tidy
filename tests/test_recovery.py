@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from youtube_watchlater_tidy.db import ensure_schema, open_catalogue
+from youtube_watchlater_tidy.enrichment import latest_found_observation
 from youtube_watchlater_tidy.importer import import_watchlater_json
 from youtube_watchlater_tidy.recovery import (
     archive_links,
@@ -14,6 +15,8 @@ from youtube_watchlater_tidy.recovery import (
     latest_archive_lookup,
     recover_with_findyoutubevideo,
 )
+from youtube_watchlater_tidy.reports import creator_rows, video_rows
+from youtube_watchlater_tidy.triage import select_title, selection_rows
 
 
 class RecoveryTests(unittest.TestCase):
@@ -73,8 +76,8 @@ class RecoveryTests(unittest.TestCase):
                 ["private", "deleted"],
             )
 
-    def test_found_result_preserves_links_and_verdict(self) -> None:
-        response = {
+    def _filmot_response(self) -> dict:
+        return {
             "id": "deleted",
             "api_version": 5,
             "keys": [
@@ -87,10 +90,22 @@ class RecoveryTests(unittest.TestCase):
                     "maybe_paywalled": False,
                     "available": [
                         {
-                            "url": "https://example.invalid/filmot/deleted",
+                            "url": "https://filmot.com/video/deleted",
                             "contains": "metadata",
                             "title": "Metadata",
                             "note": "historical metadata",
+                        }
+                    ],
+                    "rawraw": [
+                        {
+                            "id": "deleted",
+                            "title": "Recovered old title",
+                            "description": "Recovered old description",
+                            "channelid": "UCARCHIVE",
+                            "channelname": "Recovered Channel",
+                            "uploaddate": "2020-01-02T03:04:05Z",
+                            "duration": 321,
+                            "views": 4567,
                         }
                     ],
                 },
@@ -119,6 +134,9 @@ class RecoveryTests(unittest.TestCase):
             },
         }
 
+    def test_found_result_preserves_links_and_normalises_filmot_metadata(self) -> None:
+        response = self._filmot_response()
+
         with open_catalogue(self.db_path) as conn:
             result = recover_with_findyoutubevideo(
                 conn,
@@ -127,19 +145,69 @@ class RecoveryTests(unittest.TestCase):
                 show_progress=False,
             )
             row = latest_archive_lookup(conn, "deleted")
+            metadata = latest_found_observation(conn, "deleted")
+            original = conn.execute(
+                "SELECT title, channel_id, channel FROM snapshot_entries "
+                "WHERE snapshot_id = ? AND video_id = 'deleted'",
+                (self.snapshot,),
+            ).fetchone()
+            videos = {row.video_id: row for row in video_rows(conn, self.snapshot)}
+            creators = creator_rows(conn, self.snapshot)
+            selection = select_title(
+                conn,
+                contains="recovered old title",
+                snapshot_id=self.snapshot,
+            )
+            selected = selection_rows(conn, selection.selection_id)
 
-        self.assertEqual((result.found, result.not_found, result.failed), (1, 0, 0))
+        self.assertEqual(
+            (result.found, result.not_found, result.failed, result.metadata_recovered),
+            (1, 0, 0, 1),
+        )
         self.assertEqual(row["status"], "found")
         self.assertEqual(row["has_video"], 1)
         self.assertEqual(row["has_metadata"], 1)
         self.assertEqual(row["human_verdict"], "Video and metadata found")
         self.assertEqual(json.loads(row["raw_json"]), response)
 
+        self.assertEqual(metadata["source"], "filmot-via-findyoutubevideo")
+        self.assertEqual(metadata["title"], "Recovered old title")
+        self.assertEqual(metadata["channel_id"], "UCARCHIVE")
+        self.assertEqual(metadata["channel"], "Recovered Channel")
+        self.assertEqual(metadata["duration"], 321)
+        self.assertEqual(metadata["view_count"], 4567)
+
+        # Recovery enriches the effective view without mutating the source snapshot.
+        self.assertEqual(original["title"], "[Deleted video]")
+        self.assertIsNone(original["channel_id"])
+        self.assertIsNone(original["channel"])
+        self.assertEqual(videos["deleted"].title, "Recovered old title")
+        self.assertEqual(videos["deleted"].creator, "Recovered Channel")
+        recovered_creator = next(row for row in creators if row.channel_id == "UCARCHIVE")
+        self.assertEqual(recovered_creator.name, "Recovered Channel")
+        self.assertEqual([row.video_id for row in selected], ["deleted"])
+        self.assertEqual(selected[0].title, "Recovered old title")
+
         links = archive_links(response)
         self.assertEqual(len(links), 2)
         self.assertEqual(links[0].service, "Filmot")
         self.assertEqual(links[0].contains, "metadata")
         self.assertIn("video", links[1].contains)
+
+    def test_no_filmot_raw_data_does_not_create_metadata_observation(self) -> None:
+        response = self._filmot_response()
+        response["keys"][0].pop("rawraw")
+        with open_catalogue(self.db_path) as conn:
+            result = recover_with_findyoutubevideo(
+                conn,
+                ["deleted"],
+                fetcher=lambda _: response,
+                show_progress=False,
+            )
+            metadata = latest_found_observation(conn, "deleted")
+
+        self.assertEqual(result.metadata_recovered, 0)
+        self.assertIsNone(metadata)
 
     def test_wrong_video_id_is_recorded_as_error(self) -> None:
         with open_catalogue(self.db_path) as conn:
