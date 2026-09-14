@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 from tqdm import tqdm
 
 from .enrichment import store_observation
+from .preservetube import recover_preservetube_metadata
 from .reports import latest_snapshot_id
 
 UNAVAILABLE_TITLES = {"[private video]", "[deleted video]"}
@@ -108,7 +109,7 @@ def _fetch_findyoutubevideo(
     timeout: float = 90.0,
 ) -> dict[str, Any]:
     # includeRaw lets metadata-only services such as Filmot return the actual
-    # historical metadata they used to reach their verdict.  Keeping this in
+    # historical metadata they used to reach their verdict. Keeping this in
     # the federated request avoids a second request to Filmot itself.
     api_url = f"{base_url.rstrip('/')}/api/v5/{video_id}?includeRaw=true"
     request = Request(
@@ -238,7 +239,7 @@ def _normalise_filmot(video_id: str, item: dict[str, Any]) -> dict[str, Any] | N
         view_count = item.get("views")
 
     # Require at least one genuinely useful field before creating a preferred
-    # metadata observation.  rawraw sometimes contains bookkeeping only.
+    # metadata observation. rawraw sometimes contains bookkeeping only.
     if not any(value not in (None, "") for value in (title, channel_id, channel, description)):
         return None
 
@@ -286,6 +287,7 @@ def recover_with_findyoutubevideo(
     base_url: str = DEFAULT_FINDYOUTUBEVIDEO_BASE,
     timeout: float = 90.0,
     fetcher: Callable[[str], dict[str, Any]] | None = None,
+    preservetube_fetcher: Callable[[str], dict[str, Any] | None] | None = None,
     show_progress: bool = True,
 ) -> RecoveryResult:
     found = 0
@@ -339,7 +341,18 @@ def recover_with_findyoutubevideo(
             status = "not_found"
         _store_lookup(conn, video_id, status, data, source_url=source_url)
 
-        if store_recovered_metadata(conn, video_id, data):
+        # Prefer Filmot metadata carried in the federated response because it
+        # requires no extra request. If that yielded nothing, only then ask
+        # PreserveTube directly, and only when the finder says it has a copy.
+        recovered = store_recovered_metadata(conn, video_id, data)
+        if not recovered:
+            recovered = recover_preservetube_metadata(
+                conn,
+                video_id,
+                data,
+                fetcher=preservetube_fetcher,
+            )
+        if recovered:
             metadata_recovered += 1
 
     return RecoveryResult(

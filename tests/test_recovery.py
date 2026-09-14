@@ -9,6 +9,7 @@ from pathlib import Path
 from youtube_watchlater_tidy.db import ensure_schema, open_catalogue
 from youtube_watchlater_tidy.enrichment import latest_found_observation
 from youtube_watchlater_tidy.importer import import_watchlater_json
+from youtube_watchlater_tidy.preservetube import PRESERVETUBE_SOURCE
 from youtube_watchlater_tidy.recovery import (
     archive_links,
     candidate_unavailable_video_ids,
@@ -134,6 +135,38 @@ class RecoveryTests(unittest.TestCase):
             },
         }
 
+    def _preservetube_response(self) -> dict:
+        return {
+            "id": "deleted",
+            "api_version": 5,
+            "keys": [
+                {
+                    "name": "PreserveTube",
+                    "classname": "preservetube",
+                    "archived": True,
+                    "metaonly": False,
+                    "comments": False,
+                    "maybe_paywalled": False,
+                    "available": [
+                        {
+                            "url": "https://preservetube.com/watch?v=deleted",
+                            "contains": ["video", "metadata", "thumbnail"],
+                            "title": "Video",
+                            "note": None,
+                        }
+                    ],
+                    # FindYouTubeVideo currently discards PreserveTube's raw JSON.
+                    "rawraw": None,
+                }
+            ],
+            "verdict": {
+                "video": True,
+                "metaonly": False,
+                "comments": False,
+                "human_friendly": "Video found",
+            },
+        }
+
     def test_found_result_preserves_links_and_normalises_filmot_metadata(self) -> None:
         response = self._filmot_response()
 
@@ -193,6 +226,70 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(links[0].service, "Filmot")
         self.assertEqual(links[0].contains, "metadata")
         self.assertIn("video", links[1].contains)
+
+    def test_preservetube_is_used_as_metadata_fallback(self) -> None:
+        response = self._preservetube_response()
+        calls: list[str] = []
+
+        def preservetube_fetch(video_id: str) -> dict:
+            calls.append(video_id)
+            return {
+                "id": video_id,
+                "title": "Preserved old title",
+                "description": "Preserved description",
+                "channel": "Preserved Channel",
+                "channelId": "UCPRESERVED",
+                "published": "2019-05-06T07:08:09.000Z",
+                "archived": "2024-01-02T03:04:05.000Z",
+                "thumbnail": "https://example.invalid/thumb.jpg",
+                "source": "https://example.invalid/video.mp4",
+                "deletion_stage": None,
+            }
+
+        with open_catalogue(self.db_path) as conn:
+            result = recover_with_findyoutubevideo(
+                conn,
+                ["deleted"],
+                fetcher=lambda _: response,
+                preservetube_fetcher=preservetube_fetch,
+                show_progress=False,
+            )
+            metadata = latest_found_observation(conn, "deleted")
+            videos = {row.video_id: row for row in video_rows(conn, self.snapshot)}
+            selection = select_title(
+                conn,
+                contains="preserved old title",
+                snapshot_id=self.snapshot,
+            )
+            selected = selection_rows(conn, selection.selection_id)
+
+        self.assertEqual(calls, ["deleted"])
+        self.assertEqual(result.metadata_recovered, 1)
+        self.assertEqual(metadata["source"], PRESERVETUBE_SOURCE)
+        self.assertEqual(metadata["title"], "Preserved old title")
+        self.assertEqual(metadata["channel_id"], "UCPRESERVED")
+        self.assertEqual(metadata["channel"], "Preserved Channel")
+        self.assertEqual(metadata["upload_date"], "2019-05-06T07:08:09.000Z")
+        self.assertEqual(videos["deleted"].title, "Preserved old title")
+        self.assertEqual(videos["deleted"].creator, "Preserved Channel")
+        self.assertEqual([row.video_id for row in selected], ["deleted"])
+
+    def test_preservetube_is_not_called_when_filmot_metadata_exists(self) -> None:
+        def should_not_run(_: str) -> dict:
+            self.fail("PreserveTube fallback should not run when Filmot recovered metadata")
+
+        response = self._filmot_response()
+        response["keys"].append(self._preservetube_response()["keys"][0])
+        with open_catalogue(self.db_path) as conn:
+            result = recover_with_findyoutubevideo(
+                conn,
+                ["deleted"],
+                fetcher=lambda _: response,
+                preservetube_fetcher=should_not_run,
+                show_progress=False,
+            )
+
+        self.assertEqual(result.metadata_recovered, 1)
 
     def test_no_filmot_raw_data_does_not_create_metadata_observation(self) -> None:
         response = self._filmot_response()
