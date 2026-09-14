@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -54,6 +56,98 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_entries_channel_id
     ON snapshot_entries(snapshot_id, channel_id);
 CREATE INDEX IF NOT EXISTS idx_snapshot_entries_channel
     ON snapshot_entries(snapshot_id, channel);
+
+CREATE TABLE IF NOT EXISTS selections (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    selector_type TEXT NOT NULL,
+    selector_json TEXT NOT NULL,
+    entry_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS selection_entries (
+    selection_id INTEGER NOT NULL REFERENCES selections(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL REFERENCES videos(video_id),
+    PRIMARY KEY (selection_id, video_id)
+);
+
+CREATE TABLE IF NOT EXISTS decision_events (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL REFERENCES videos(video_id),
+    action TEXT NOT NULL CHECK(action IN ('keep', 'review', 'archive', 'delete', 'move', 'clear')),
+    destination_playlist TEXT,
+    source TEXT NOT NULL,
+    rule_json TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    supersedes_id INTEGER REFERENCES decision_events(id),
+    CHECK((action = 'move' AND destination_playlist IS NOT NULL) OR action != 'move')
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_events_snapshot_video
+    ON decision_events(snapshot_id, video_id, id);
+CREATE INDEX IF NOT EXISTS idx_selections_snapshot
+    ON selections(snapshot_id, id);
+
+CREATE VIEW IF NOT EXISTS current_decisions AS
+SELECT d.*
+FROM decision_events AS d
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM decision_events AS newer
+    WHERE newer.snapshot_id = d.snapshot_id
+      AND newer.video_id = d.video_id
+      AND newer.id > d.id
+);
+"""
+
+MIGRATION_1_TO_2 = """
+CREATE TABLE IF NOT EXISTS selections (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    selector_type TEXT NOT NULL,
+    selector_json TEXT NOT NULL,
+    entry_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS selection_entries (
+    selection_id INTEGER NOT NULL REFERENCES selections(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL REFERENCES videos(video_id),
+    PRIMARY KEY (selection_id, video_id)
+);
+
+CREATE TABLE IF NOT EXISTS decision_events (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL REFERENCES videos(video_id),
+    action TEXT NOT NULL CHECK(action IN ('keep', 'review', 'archive', 'delete', 'move', 'clear')),
+    destination_playlist TEXT,
+    source TEXT NOT NULL,
+    rule_json TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    supersedes_id INTEGER REFERENCES decision_events(id),
+    CHECK((action = 'move' AND destination_playlist IS NOT NULL) OR action != 'move')
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_events_snapshot_video
+    ON decision_events(snapshot_id, video_id, id);
+CREATE INDEX IF NOT EXISTS idx_selections_snapshot
+    ON selections(snapshot_id, id);
+
+CREATE VIEW IF NOT EXISTS current_decisions AS
+SELECT d.*
+FROM decision_events AS d
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM decision_events AS newer
+    WHERE newer.snapshot_id = d.snapshot_id
+      AND newer.video_id = d.video_id
+      AND newer.id > d.id
+);
 """
 
 
@@ -69,6 +163,15 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def open_catalogue(path: str | Path) -> Iterator[sqlite3.Connection]:
+    conn = connect(path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:
@@ -81,7 +184,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(SCHEMA_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    elif version != SCHEMA_VERSION:
+        return
+
+    if version == 1:
+        with conn:
+            conn.executescript(MIGRATION_1_TO_2)
+            conn.execute("PRAGMA user_version = 2")
+        return
+
+    if version != SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema version {version} is not supported; expected {SCHEMA_VERSION}"
         )
