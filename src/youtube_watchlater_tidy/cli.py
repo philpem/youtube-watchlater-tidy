@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -8,6 +9,13 @@ from pathlib import Path
 from .db import open_catalogue
 from .enrichment import candidate_video_ids, enrich_with_ytdlp
 from .importer import import_watchlater_json
+from .recovery import (
+    DEFAULT_FINDYOUTUBEVIDEO_BASE,
+    archive_links,
+    candidate_unavailable_video_ids,
+    latest_archive_lookup,
+    recover_with_findyoutubevideo,
+)
 from .reports import (
     creator_rows,
     format_duration,
@@ -117,6 +125,57 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-progress",
         action="store_true",
         help="disable the tqdm progress bar",
+    )
+
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="look for deleted/private videos in public archives",
+    )
+    recover_target = recover_parser.add_mutually_exclusive_group(required=True)
+    recover_target.add_argument(
+        "--unavailable",
+        action="store_true",
+        help="recover all [Private video]/[Deleted video] entries in the snapshot",
+    )
+    recover_target.add_argument("--video-id", help="recover one video id from the snapshot")
+    recover_parser.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
+    recover_parser.add_argument("--limit", type=int, help="maximum number of videos to look up")
+    recover_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="look up videos even when a found/not-found result is already cached",
+    )
+    recover_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show video ids that would be queried without making network requests",
+    )
+    recover_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_FINDYOUTUBEVIDEO_BASE,
+        help=f"FindYouTubeVideo server (default: {DEFAULT_FINDYOUTUBEVIDEO_BASE})",
+    )
+    recover_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=90.0,
+        help="per-video HTTP timeout in seconds (default: 90)",
+    )
+    recover_parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="disable the tqdm progress bar",
+    )
+
+    recovery_parser = subparsers.add_parser(
+        "recovery",
+        help="show the latest cached archive-recovery result for one video",
+    )
+    recovery_parser.add_argument("video_id")
+    recovery_parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="print the complete cached FindYouTubeVideo JSON response",
     )
 
     select_parser = subparsers.add_parser("select", help="create and preview a cohort selection")
@@ -244,6 +303,92 @@ def _cmd_enrich(args: argparse.Namespace) -> int:
     return 0 if result.failed == 0 else 1
 
 
+def _render_recovery(row) -> str:
+    raw = json.loads(row["raw_json"])
+    lines = [
+        f"Video ID: {row['video_id']}",
+        f"Status: {row['status']}",
+        f"Lookup: {row['looked_up_at']} via {row['backend']}",
+        f"Verdict: {row['human_verdict'] or '-'}",
+        "Saved: "
+        f"video={'yes' if row['has_video'] else 'no'} "
+        f"metadata={'yes' if row['has_metadata'] else 'no'} "
+        f"comments={'yes' if row['has_comments'] else 'no'}",
+        f"Finder: {row['source_url'] or '-'}",
+    ]
+    links = archive_links(raw)
+    if links:
+        lines.append("Archive links:")
+        for link in links:
+            paywall = " [possibly paywalled]" if link.maybe_paywalled else ""
+            contains = f" ({link.contains})" if link.contains not in ("", "null") else ""
+            lines.append(f"  {link.service}: {link.title}{contains}{paywall}")
+            lines.append(f"    {link.url}")
+            if link.note:
+                lines.append(f"    note: {link.note}")
+    else:
+        lines.append("Archive links: none returned")
+    return "\n".join(lines)
+
+
+def _cmd_recover(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        video_ids = candidate_unavailable_video_ids(
+            conn,
+            args.snapshot,
+            video_id=args.video_id,
+            limit=args.limit,
+            refresh=args.refresh,
+        )
+
+        if args.dry_run:
+            for video_id in video_ids:
+                print(video_id)
+            print(f"{len(video_ids)} video(s) would be queried")
+            return 0
+
+        if not video_ids:
+            print("No videos need archive recovery.")
+            return 0
+
+        print(
+            f"Querying FindYouTubeVideo for {len(video_ids)} video(s)...",
+            flush=True,
+        )
+        result = recover_with_findyoutubevideo(
+            conn,
+            video_ids,
+            base_url=args.base_url,
+            timeout=args.timeout,
+            show_progress=not args.no_progress,
+        )
+
+        single_row = None
+        if args.video_id:
+            single_row = latest_archive_lookup(conn, args.video_id)
+
+    print(
+        f"Recovery complete: {result.found} found, {result.not_found} not found, "
+        f"{result.failed} failed ({result.attempted} attempted)"
+    )
+    if single_row is not None:
+        print()
+        print(_render_recovery(single_row))
+    return 0 if result.failed == 0 else 1
+
+
+def _cmd_recovery(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        row = latest_archive_lookup(conn, args.video_id)
+    if row is None:
+        raise ValueError(f"no cached archive recovery exists for {args.video_id!r}")
+    if args.raw:
+        print(json.dumps(json.loads(row["raw_json"]), ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(_render_recovery(row))
+    return 0
+
+
 def _render_selection(rows: list, limit: int | None = None) -> str:
     if limit is not None:
         shown = rows[:limit]
@@ -356,6 +501,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_videos(args)
         if args.command == "enrich":
             return _cmd_enrich(args)
+        if args.command == "recover":
+            return _cmd_recover(args)
+        if args.command == "recovery":
+            return _cmd_recovery(args)
         if args.command == "select":
             return _cmd_select(args)
         if args.command == "selection":

@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -138,6 +138,23 @@ WHERE m.status = 'found'
         AND newer.status = 'found'
         AND newer.id > m.id
   );
+
+CREATE TABLE IF NOT EXISTS archive_lookups (
+    id INTEGER PRIMARY KEY,
+    video_id TEXT NOT NULL REFERENCES videos(video_id) ON DELETE CASCADE,
+    backend TEXT NOT NULL,
+    looked_up_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('found', 'not_found', 'error')),
+    has_video INTEGER NOT NULL DEFAULT 0 CHECK(has_video IN (0, 1)),
+    has_metadata INTEGER NOT NULL DEFAULT 0 CHECK(has_metadata IN (0, 1)),
+    has_comments INTEGER NOT NULL DEFAULT 0 CHECK(has_comments IN (0, 1)),
+    human_verdict TEXT,
+    source_url TEXT,
+    raw_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_lookups_video_backend
+    ON archive_lookups(video_id, backend, id);
 """
 
 MIGRATION_1_TO_2 = """
@@ -226,6 +243,25 @@ WHERE m.status = 'found'
   );
 """
 
+MIGRATION_3_TO_4 = """
+CREATE TABLE IF NOT EXISTS archive_lookups (
+    id INTEGER PRIMARY KEY,
+    video_id TEXT NOT NULL REFERENCES videos(video_id) ON DELETE CASCADE,
+    backend TEXT NOT NULL,
+    looked_up_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('found', 'not_found', 'error')),
+    has_video INTEGER NOT NULL DEFAULT 0 CHECK(has_video IN (0, 1)),
+    has_metadata INTEGER NOT NULL DEFAULT 0 CHECK(has_metadata IN (0, 1)),
+    has_comments INTEGER NOT NULL DEFAULT 0 CHECK(has_comments IN (0, 1)),
+    human_verdict TEXT,
+    source_url TEXT,
+    raw_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_lookups_video_backend
+    ON archive_lookups(video_id, backend, id);
+"""
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
@@ -266,13 +302,21 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(MIGRATION_1_TO_2)
             conn.executescript(MIGRATION_2_TO_3)
-            conn.execute("PRAGMA user_version = 3")
+            conn.executescript(MIGRATION_3_TO_4)
+            conn.execute("PRAGMA user_version = 4")
         return
 
     if version == 2:
         with conn:
             conn.executescript(MIGRATION_2_TO_3)
-            conn.execute("PRAGMA user_version = 3")
+            conn.executescript(MIGRATION_3_TO_4)
+            conn.execute("PRAGMA user_version = 4")
+        return
+
+    if version == 3:
+        with conn:
+            conn.executescript(MIGRATION_3_TO_4)
+            conn.execute("PRAGMA user_version = 4")
         return
 
     if version != SCHEMA_VERSION:
