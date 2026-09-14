@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Tools for triaging and cleaning up a large YouTube Watch Later playlist"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "tqdm>=4.66",
+]
 
 [project.scripts]
 watchlater = "youtube_watchlater_tidy.cli:main"
