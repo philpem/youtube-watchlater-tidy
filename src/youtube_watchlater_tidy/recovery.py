@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -17,6 +19,7 @@ from .wayback import recover_wayback_metadata
 
 UNAVAILABLE_TITLES = {"[private video]", "[deleted video]"}
 DEFAULT_FINDYOUTUBEVIDEO_BASE = "https://findyoutubevideo.thetechrobo.ca"
+DEFAULT_RECOVERY_WORKERS = 4
 BACKEND_NAME = "findyoutubevideo-v5"
 FILMOT_SOURCE = "filmot-via-findyoutubevideo"
 
@@ -103,27 +106,53 @@ def candidate_unavailable_video_ids(
     return result
 
 
-def _fetch_findyoutubevideo(
+def _request_findyoutubevideo(
     video_id: str,
     *,
-    base_url: str = DEFAULT_FINDYOUTUBEVIDEO_BASE,
-    timeout: float = 90.0,
-) -> dict[str, Any]:
-    api_url = f"{base_url.rstrip('/')}/api/v5/{video_id}?includeRaw=true"
-    request = Request(
+    base_url: str,
+    timeout: float,
+    stream: bool,
+) -> Request:
+    query = "?includeRaw=true"
+    if stream:
+        query += "&stream=true"
+    api_url = f"{base_url.rstrip('/')}/api/v5/{video_id}{query}"
+    return Request(
         api_url,
         headers={
             "Accept": "application/json",
             "User-Agent": "youtube-watchlater-tidy/0.1 (+https://github.com/philpem/youtube-watchlater-tidy)",
         },
     )
+
+
+def _open_findyoutubevideo(request: Request, *, timeout: float):
     try:
-        with urlopen(request, timeout=timeout) as response:
-            payload = response.read()
+        return urlopen(request, timeout=timeout)
     except HTTPError as exc:
+        if exc.code == 429:
+            raise RuntimeError(
+                "HTTP 429 from FindYouTubeVideo (rate limited; retry later or reduce concurrency)"
+            ) from exc
         raise RuntimeError(f"HTTP {exc.code} from FindYouTubeVideo") from exc
     except URLError as exc:
         raise RuntimeError(f"FindYouTubeVideo request failed: {exc.reason}") from exc
+
+
+def _fetch_findyoutubevideo(
+    video_id: str,
+    *,
+    base_url: str = DEFAULT_FINDYOUTUBEVIDEO_BASE,
+    timeout: float = 90.0,
+) -> dict[str, Any]:
+    request = _request_findyoutubevideo(
+        video_id,
+        base_url=base_url,
+        timeout=timeout,
+        stream=False,
+    )
+    with _open_findyoutubevideo(request, timeout=timeout) as response:
+        payload = response.read()
 
     try:
         data = json.loads(payload)
@@ -140,6 +169,99 @@ def _fetch_findyoutubevideo(
     if data.get("status") == "bad.id":
         raise RuntimeError(f"FindYouTubeVideo rejected video id {video_id!r}")
     return data
+
+
+def _fetch_findyoutubevideo_stream(
+    video_id: str,
+    *,
+    base_url: str = DEFAULT_FINDYOUTUBEVIDEO_BASE,
+    timeout: float = 90.0,
+    on_service: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
+    """Fetch one finder result using its JSONL streaming protocol.
+
+    FindYouTubeVideo runs its archive backends concurrently, but the ordinary API
+    response is withheld until every backend has finished. Streaming gives us
+    useful liveness information while preserving the same final result.
+    """
+    request = _request_findyoutubevideo(
+        video_id,
+        base_url=base_url,
+        timeout=timeout,
+        stream=True,
+    )
+
+    service_names: dict[str, str] = {}
+    services: list[dict[str, Any]] = []
+    links: dict[str, list[dict[str, Any]]] = {}
+    verdict: dict[str, Any] | None = None
+    state = "preparation"
+
+    with _open_findyoutubevideo(request, timeout=timeout) as response:
+        for raw_line in response:
+            if not raw_line.strip():
+                continue
+            try:
+                item = json.loads(raw_line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"FindYouTubeVideo returned invalid streamed JSON for {video_id}: {exc}"
+                ) from exc
+
+            if state == "preparation":
+                if not isinstance(item, dict):
+                    raise RuntimeError(
+                        f"FindYouTubeVideo stream for {video_id} did not start with a service map"
+                    )
+                service_names = {
+                    str(key): str(value)
+                    for key, value in item.items()
+                }
+                state = "generation"
+                continue
+
+            if state == "generation":
+                if item is None:
+                    state = "verdict"
+                    continue
+                if not isinstance(item, dict):
+                    continue
+
+                item_type = item.get("type")
+                classname = str(item.get("classname") or "")
+                if item_type == "link":
+                    links.setdefault(classname, []).append(item)
+                    continue
+                if item_type != "service":
+                    continue
+
+                # Current finder versions already put the completed links on
+                # the service object. Keep a fallback for older stream shapes.
+                if not isinstance(item.get("available"), list):
+                    item["available"] = links.get(classname, [])
+                services.append(item)
+                if on_service is not None:
+                    name = str(item.get("name") or service_names.get(classname) or classname or "service")
+                    on_service(video_id, name)
+                continue
+
+            if state == "verdict":
+                if isinstance(item, dict):
+                    verdict = item
+                break
+
+    if state == "preparation":
+        raise RuntimeError(f"FindYouTubeVideo returned an empty stream for {video_id}")
+    if verdict is None:
+        raise RuntimeError(f"FindYouTubeVideo stream ended before the verdict for {video_id}")
+
+    return {
+        "id": video_id,
+        "status": "ok",
+        "api_version": 5,
+        "keys": services,
+        "verdict": verdict,
+    }
 
 
 def _is_found(data: dict[str, Any]) -> bool:
@@ -276,6 +398,42 @@ def store_recovered_metadata(
     return True
 
 
+def _process_recovery_result(
+    conn: sqlite3.Connection,
+    video_id: str,
+    data: dict[str, Any],
+    *,
+    base_url: str,
+    preservetube_fetcher: Callable[[str], dict[str, Any] | None] | None,
+    wayback_fetcher: Callable[[str], str] | None,
+) -> tuple[bool, bool]:
+    """Store one finder result and run metadata fallbacks.
+
+    Returns (found, metadata_recovered).
+    """
+    found = _is_found(data)
+    status = "found" if found else "not_found"
+    source_url = f"{base_url.rstrip('/')}/?q={video_id}"
+    _store_lookup(conn, video_id, status, data, source_url=source_url)
+
+    recovered = store_recovered_metadata(conn, video_id, data)
+    if not recovered:
+        recovered = recover_preservetube_metadata(
+            conn,
+            video_id,
+            data,
+            fetcher=preservetube_fetcher,
+        )
+    if not recovered:
+        recovered = recover_wayback_metadata(
+            conn,
+            video_id,
+            data,
+            fetcher=wayback_fetcher,
+        )
+    return found, recovered
+
+
 def recover_with_findyoutubevideo(
     conn: sqlite3.Connection,
     video_ids: list[str],
@@ -286,75 +444,110 @@ def recover_with_findyoutubevideo(
     preservetube_fetcher: Callable[[str], dict[str, Any] | None] | None = None,
     wayback_fetcher: Callable[[str], str] | None = None,
     show_progress: bool = True,
+    workers: int = DEFAULT_RECOVERY_WORKERS,
 ) -> RecoveryResult:
     found = 0
     not_found = 0
     failed = 0
     metadata_recovered = 0
 
-    if fetcher is None:
-        fetcher = lambda vid: _fetch_findyoutubevideo(
-            vid,
-            base_url=base_url,
-            timeout=timeout,
-        )
+    if workers < 1:
+        raise ValueError("recovery workers must be at least 1")
 
     progress = tqdm(
-        video_ids,
+        total=len(video_ids),
         desc="Archive recovery",
         unit="video",
         disable=not show_progress,
         dynamic_ncols=True,
     )
-    for video_id in progress:
-        progress.set_postfix_str(
-            f"{video_id} found={found} metadata={metadata_recovered} "
-            f"missing={not_found} failed={failed}"
-        )
-        source_url = f"{base_url.rstrip('/')}/?q={video_id}"
-        try:
-            data = fetcher(video_id)
-            returned_id = data.get("id") if isinstance(data, dict) else None
-            if returned_id and returned_id != video_id:
-                raise RuntimeError(
-                    f"FindYouTubeVideo returned video {returned_id!r} while recovering {video_id!r}"
-                )
-        except Exception as exc:
-            failed += 1
-            _store_lookup(
-                conn,
-                video_id,
-                "error",
-                {"error": str(exc)},
-                source_url=source_url,
-            )
-            continue
 
-        if _is_found(data):
+    def finish_video(video_id: str, data: dict[str, Any]) -> None:
+        nonlocal found, not_found, metadata_recovered
+        was_found, recovered = _process_recovery_result(
+            conn,
+            video_id,
+            data,
+            base_url=base_url,
+            preservetube_fetcher=preservetube_fetcher,
+            wayback_fetcher=wayback_fetcher,
+        )
+        if was_found:
             found += 1
-            status = "found"
         else:
             not_found += 1
-            status = "not_found"
-        _store_lookup(conn, video_id, status, data, source_url=source_url)
-
-        recovered = store_recovered_metadata(conn, video_id, data)
-        if not recovered:
-            recovered = recover_preservetube_metadata(
-                conn,
-                video_id,
-                data,
-                fetcher=preservetube_fetcher,
-            )
-        if not recovered:
-            recovered = recover_wayback_metadata(
-                conn,
-                video_id,
-                data,
-                fetcher=wayback_fetcher,
-            )
         if recovered:
             metadata_recovered += 1
+        progress.update(1)
+        progress.set_postfix_str(
+            f"found={found} metadata={metadata_recovered} missing={not_found} failed={failed}"
+        )
+
+    def fail_video(video_id: str, exc: Exception) -> None:
+        nonlocal failed
+        failed += 1
+        _store_lookup(
+            conn,
+            video_id,
+            "error",
+            {"error": str(exc)},
+            source_url=f"{base_url.rstrip('/')}/?q={video_id}",
+        )
+        progress.update(1)
+        progress.set_postfix_str(
+            f"found={found} metadata={metadata_recovered} missing={not_found} failed={failed}"
+        )
+
+    try:
+        # Injected fetchers are primarily used by deterministic tests and by
+        # callers that want complete control over I/O. Preserve the old serial
+        # behaviour for them.
+        if fetcher is not None:
+            for video_id in video_ids:
+                progress.set_postfix_str(f"{video_id} querying finder")
+                try:
+                    data = fetcher(video_id)
+                    returned_id = data.get("id") if isinstance(data, dict) else None
+                    if returned_id and returned_id != video_id:
+                        raise RuntimeError(
+                            f"FindYouTubeVideo returned video {returned_id!r} while recovering {video_id!r}"
+                        )
+                except Exception as exc:
+                    fail_video(video_id, exc)
+                    continue
+                finish_video(video_id, data)
+        else:
+            progress_lock = Lock()
+
+            def service_status(video_id: str, service: str) -> None:
+                if not show_progress:
+                    return
+                with progress_lock:
+                    progress.set_postfix_str(f"{video_id}: {service}")
+                    progress.refresh()
+
+            max_workers = min(workers, max(1, len(video_ids)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _fetch_findyoutubevideo_stream,
+                        video_id,
+                        base_url=base_url,
+                        timeout=timeout,
+                        on_service=service_status,
+                    ): video_id
+                    for video_id in video_ids
+                }
+                for future in as_completed(futures):
+                    video_id = futures[future]
+                    try:
+                        data = future.result()
+                    except Exception as exc:
+                        fail_video(video_id, exc)
+                        continue
+                    finish_video(video_id, data)
+    finally:
+        progress.close()
 
     return RecoveryResult(
         attempted=len(video_ids),
