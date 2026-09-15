@@ -7,15 +7,34 @@ from dataclasses import dataclass
 
 from .reports import _effective_rows, latest_snapshot_id
 
-TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9+#._-]*")
+# Keep punctuation that is often semantically meaningful in technical terms
+# (C++, V.34, ESPHome, 3D, etc.) and keep apostrophes inside contractions so
+# "don't" does not turn into the meaningless bigram "don t".
+TOKEN_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9+#._-]*(?:['’][A-Za-z0-9][A-Za-z0-9+#._-]*)*"
+)
 
-# Deliberately small and unsurprising. Technical terms are not stemmed or
-# normalised beyond case-folding, so C++, V.34, Z80, ESPHome, etc. survive.
-STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
-    "how", "i", "in", "is", "it", "of", "on", "or", "the", "this", "to",
-    "vs", "with", "you", "your",
+# Common function words and contraction forms. These are deliberately used for
+# keyword discovery only; titles themselves are never rewritten. Technical
+# terms are not stemmed or otherwise normalised beyond case-folding.
+COMMON_WORDS = {
+    "a", "about", "after", "all", "also", "am", "an", "and", "any", "are",
+    "aren't", "as", "at", "be", "been", "being", "but", "by", "can", "can't",
+    "could", "couldn't", "did", "didn't", "do", "does", "doesn't", "don't",
+    "for", "from", "had", "has", "have", "haven't", "he", "her", "here",
+    "here's", "hers", "him", "his", "how", "i", "i'd", "i'll", "i'm", "i've",
+    "if", "in", "into", "is", "isn't", "it", "it's", "its", "let", "let's",
+    "me", "more", "most", "my", "no", "not", "of", "on", "one", "or", "our",
+    "ours", "people", "r", "she", "should", "so", "some", "than", "that",
+    "that's", "the", "their", "them", "then", "there", "there's", "these",
+    "they", "they're", "this", "those", "to", "too", "us", "ve", "vs", "was",
+    "wasn't", "we", "we're", "were", "weren't", "what", "what's", "when",
+    "where", "which", "who", "why", "will", "with", "won't", "would", "you",
+    "you'd", "you'll", "you're", "you've", "your", "yours",
 }
+
+# Recurring title structure that is usually less useful than topical phrases.
+SERIES_WORDS = {"part", "pt", "episode", "ep", "chapter"}
 
 
 @dataclass(frozen=True)
@@ -28,23 +47,39 @@ class KeywordRow:
 
 
 def _tokens(title: str) -> list[str]:
-    return [match.group(0).casefold() for match in TOKEN_RE.finditer(title)]
+    return [
+        match.group(0).replace("’", "'").casefold()
+        for match in TOKEN_RE.finditer(title)
+    ]
 
 
-def _ngrams(tokens: list[str], size: int) -> set[str]:
+def _is_series_fragment(words: list[str]) -> bool:
+    if len(words) < 2 or words[0] not in SERIES_WORDS:
+        return False
+    suffix = words[1].rstrip(".:")
+    return suffix.isdigit() or re.fullmatch(r"[ivxlcdm]+", suffix, re.IGNORECASE) is not None
+
+
+def _ngrams(tokens: list[str], size: int, *, include_common: bool = False) -> set[str]:
     phrases: set[str] = set()
     for start in range(0, len(tokens) - size + 1):
         words = tokens[start : start + size]
-        if size == 1:
-            if words[0] in STOPWORDS:
-                continue
-        else:
-            # Reject boilerplate fragments such as "how to" / "the best" but
-            # retain useful phrases with internal glue words.
-            if words[0] in STOPWORDS or words[-1] in STOPWORDS:
-                continue
-            if all(word in STOPWORDS for word in words):
-                continue
+
+        if not include_common:
+            if size == 1:
+                if words[0] in COMMON_WORDS:
+                    continue
+            else:
+                # Low-information n-grams tend to start or end in a function
+                # word ("what happens", "truth about", "people who", ...).
+                # Glue words are still allowed internally, e.g. "history of x".
+                if words[0] in COMMON_WORDS or words[-1] in COMMON_WORDS:
+                    continue
+                if all(word in COMMON_WORDS for word in words):
+                    continue
+                if _is_series_fragment(words):
+                    continue
+
         phrase = " ".join(words)
         if len(phrase) < 2:
             continue
@@ -60,6 +95,7 @@ def keyword_rows(
     ngram: int = 1,
     min_count: int = 2,
     max_examples: int = 2,
+    include_common: bool = False,
 ) -> list[KeywordRow]:
     if ngram not in (1, 2, 3):
         raise ValueError("--ngram must be 1, 2, or 3")
@@ -81,7 +117,7 @@ def keyword_rows(
         if not title or title.casefold() in {"[private video]", "[deleted video]"}:
             continue
 
-        for phrase in _ngrams(_tokens(title), ngram):
+        for phrase in _ngrams(_tokens(title), ngram, include_common=include_common):
             positions[phrase].append(int(row["position"]))
             if len(examples[phrase]) < max_examples and title not in examples[phrase]:
                 examples[phrase].append(title)
