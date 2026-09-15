@@ -12,10 +12,10 @@ from .importer import import_watchlater_json
 from .recovery import (
     DEFAULT_FINDYOUTUBEVIDEO_BASE,
     archive_links,
-    candidate_unavailable_video_ids,
     latest_archive_lookup,
     recover_with_findyoutubevideo,
 )
+from .recovery_targets import recovery_candidate_video_ids
 from .reports import (
     creator_rows,
     format_duration,
@@ -151,15 +151,36 @@ def _build_parser() -> argparse.ArgumentParser:
     recover_target.add_argument(
         "--unavailable",
         action="store_true",
-        help="recover all [Private video]/[Deleted video] entries in the snapshot",
+        help="recover unavailable entries from the selected snapshot/range",
     )
-    recover_target.add_argument("--video-id", help="recover one video id from the snapshot")
+    recover_target.add_argument(
+        "--video-id",
+        action="append",
+        dest="video_ids",
+        metavar="VIDEO_ID",
+        help="recover one exact video id; repeat to target several ids",
+    )
+    recover_target.add_argument(
+        "--selection",
+        type=int,
+        help="recover unavailable entries contained in a saved selection",
+    )
     recover_parser.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
     recover_parser.add_argument("--limit", type=int, help="maximum number of videos to look up")
     recover_parser.add_argument(
+        "--min-position",
+        type=int,
+        help="minimum playlist position (only with --unavailable)",
+    )
+    recover_parser.add_argument(
+        "--max-position",
+        type=int,
+        help="maximum playlist position (only with --unavailable)",
+    )
+    recover_parser.add_argument(
         "--refresh",
         action="store_true",
-        help="look up videos even when a found/not-found result is already cached",
+        help="ignore cached results for the explicitly selected target",
     )
     recover_parser.add_argument(
         "--dry-run",
@@ -351,11 +372,29 @@ def _render_recovery(row) -> str:
 
 
 def _cmd_recover(args: argparse.Namespace) -> int:
+    if (
+        args.refresh
+        and args.unavailable
+        and args.limit is not None
+        and args.min_position is None
+        and args.max_position is None
+    ):
+        print(
+            "watchlater: warning: --refresh bypasses the cache, so --unavailable "
+            "--limit will revisit the first N unavailable entries; use position bounds, "
+            "--video-id, or --selection to refresh a particular subset",
+            file=sys.stderr,
+        )
+
     with open_catalogue(args.db) as conn:
-        video_ids = candidate_unavailable_video_ids(
+        video_ids = recovery_candidate_video_ids(
             conn,
             args.snapshot,
-            video_id=args.video_id,
+            unavailable=args.unavailable,
+            video_ids=args.video_ids,
+            selection_id=args.selection,
+            min_position=args.min_position,
+            max_position=args.max_position,
             limit=args.limit,
             refresh=args.refresh,
         )
@@ -383,12 +422,14 @@ def _cmd_recover(args: argparse.Namespace) -> int:
         )
 
         single_row = None
-        if args.video_id:
-            single_row = latest_archive_lookup(conn, args.video_id)
+        if args.video_ids and len(args.video_ids) == 1:
+            single_row = latest_archive_lookup(conn, args.video_ids[0])
 
     print(
-        f"Recovery complete: {result.found} found, {result.not_found} not found, "
-        f"{result.failed} failed ({result.attempted} attempted)"
+        f"Recovery complete: {result.found} archive hit(s), "
+        f"{result.metadata_recovered} with recovered metadata, "
+        f"{result.not_found} not found, {result.failed} failed "
+        f"({result.attempted} attempted)"
     )
     if single_row is not None:
         print()
