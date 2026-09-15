@@ -1,0 +1,61 @@
+# Copy this to watchlater.toml and adjust model names/paths for your system.
+# Do not put API keys in this file; reference an environment variable instead.
+
+default_provider = "ollama-local"
+default_interest_profile = "default"
+
+[providers.ollama-local]
+preset = "ollama"
+model = "qwen3:14b"
+temperature = 0.0
+max_tokens = 1200
+structured_mode = "json_object"
+
+[providers.vllm-local]
+preset = "vllm"
+model = "Qwen/Qwen3-14B"
+concurrency = 4
+structured_mode = "json_schema"
+
+# Convenience alias for an Unsloth-trained/exported model served through vLLM.
+# Override base_url if you serve the Unsloth model through llama-server/Ollama.
+[providers.unsloth-local]
+preset = "unsloth"
+model = "my-org/my-unsloth-model"
+structured_mode = "json_schema"
+
+[providers.openrouter]
+preset = "openrouter"
+model = "anthropic/claude-sonnet-4.5"
+# api_key_env defaults to OPENROUTER_API_KEY for this preset.
+structured_mode = "json_object"
+
+[providers.openrouter.headers]
+HTTP-Referer = "https://github.com/philpem/youtube-watchlater-tidy"
+X-Title = "youtube-watchlater-tidy"
+
+[providers.remote]
+preset = "generic"
+base_url = "https://llm.example.invalid/v1"
+model = "example-model"
+api_key_env = "WATCHLATER_LLM_API_KEY"
+timeout = 120
+retries = 3
+structured_mode = "json_object"
+
+# Arbitrary OpenAI-compatible request fields can be passed through here.
+# Do not repeat reserved fields such as model/messages/temperature/max_tokens.
+[providers.remote.extra]
+reasoning_effort = "medium"
+
+[interest_profiles.default]
+file = "interests.example.md"
+
+[interest_profiles.strict]
+file = "interests.example.md"
+guidance = "When confidence is below 0.65, prefer review over delete."
+
+[playlists]
+"Queue - Electronics" = "Embedded systems, electronics, test equipment, PCB work and technically deep hardware repair."
+"Queue - Retrocomputing" = "Vintage computers, unusual architectures, restoration, emulation and computing history."
+"Queue - Communications" = "Telephony, modems, radio, networking history and communications engineering."
