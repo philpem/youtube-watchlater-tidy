@@ -9,6 +9,7 @@ from pathlib import Path
 from .db import open_catalogue
 from .enrichment import candidate_video_ids, enrich_with_ytdlp
 from .importer import import_watchlater_json
+from .keywords import keyword_rows, render_keywords
 from .recovery import (
     DEFAULT_FINDYOUTUBEVIDEO_BASE,
     archive_links,
@@ -23,6 +24,7 @@ from .reports import (
     render_videos,
     video_rows,
 )
+from .selection_export import selection_export_text
 from .triage import (
     ACTIONS,
     apply_selection_action,
@@ -82,6 +84,17 @@ def _build_parser() -> argparse.ArgumentParser:
     creators_parser.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
     creators_parser.add_argument("--limit", type=int, default=50, help="maximum rows to show (default: 50)")
     creators_parser.add_argument("--remaining", action="store_true", help="only unresolved videos")
+
+    keywords_parser = subparsers.add_parser(
+        "keywords",
+        help="show repeated title keywords or adjacent phrases",
+    )
+    keywords_parser.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
+    keywords_parser.add_argument("--remaining", action="store_true", help="only unresolved videos")
+    keywords_parser.add_argument("--ngram", type=int, choices=(1, 2, 3), default=1)
+    keywords_parser.add_argument("--min-count", type=int, default=2)
+    keywords_parser.add_argument("--examples", type=int, default=2)
+    keywords_parser.add_argument("--limit", type=int, default=50)
 
     videos_parser = subparsers.add_parser("videos", help="show individual videos")
     videos_parser.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
@@ -249,6 +262,12 @@ def _build_parser() -> argparse.ArgumentParser:
     selection_undo.add_argument("--snapshot", type=int)
     selection_undo.add_argument("--id", type=int, dest="selection_id")
 
+    selection_export = selection_sub.add_parser("export", help="export a selection as JSON or CSV")
+    selection_export.add_argument("--snapshot", type=int)
+    selection_export.add_argument("--id", type=int, dest="selection_id")
+    selection_export.add_argument("--format", choices=("json", "csv"), default="json")
+    selection_export.add_argument("--output", type=Path, help="output file (default: stdout)")
+
     return parser
 
 
@@ -289,6 +308,20 @@ def _cmd_creators(args: argparse.Namespace) -> int:
     with open_catalogue(args.db) as conn:
         rows = creator_rows(conn, args.snapshot, remaining=args.remaining)
     print(render_creators(rows, args.limit))
+    return 0
+
+
+def _cmd_keywords(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        rows = keyword_rows(
+            conn,
+            args.snapshot,
+            remaining=args.remaining,
+            ngram=args.ngram,
+            min_count=args.min_count,
+            max_examples=args.examples,
+        )
+    print(render_keywords(rows, args.limit))
     return 0
 
 
@@ -543,6 +576,14 @@ def _cmd_selection(args: argparse.Namespace) -> int:
             )
             print(f"Selection {selection_id}: cleared current decisions for {count} video(s)")
             return 0
+        if args.selection_command == "export":
+            text = selection_export_text(conn, selection_id, format=args.format)
+            if args.output:
+                args.output.write_text(text, encoding="utf-8")
+                print(f"Selection {selection_id}: wrote {args.format.upper()} to {args.output}")
+            else:
+                print(text, end="")
+            return 0
     raise RuntimeError("unreachable selection command")
 
 
@@ -557,6 +598,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_snapshots(args)
         if args.command == "creators":
             return _cmd_creators(args)
+        if args.command == "keywords":
+            return _cmd_keywords(args)
         if args.command == "videos":
             return _cmd_videos(args)
         if args.command == "enrich":
