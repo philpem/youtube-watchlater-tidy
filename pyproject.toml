@@ -22,6 +22,7 @@ watchlater-metadata = "youtube_watchlater_tidy.metadata_cli:main"
 watchlater-transcript = "youtube_watchlater_tidy.transcript_cli:main"
 watchlater-llm-transcript = "youtube_watchlater_tidy.llm_transcript_cli:main"
 watchlater-review = "youtube_watchlater_tidy.review_cli:main"
+watchlater-playlist = "youtube_watchlater_tidy.playlist_sync_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -45,6 +45,9 @@ LLM first pass over unresolved videos
                                                    local human review
                                                                |
                                                                v
+                                             playlist move planning
+                                                               |
+                                                               v
                                                later YouTube execution
 ```
 
@@ -54,7 +57,8 @@ Safety rules:
 2. **Human and saved-rule decisions outrank LLM suggestions.** LLM output is advisory and stored separately from `decision_events`.
 3. **Actions are local plans.** `delete`, `archive` and `move` currently do not mutate YouTube.
 4. **Network work is selective and cached.** Prefer explicit cohorts and `--dry-run`.
-5. **History is retained.** Decisions, metadata observations, archive lookups, transcript observations and LLM runs are append-only where practical.
+5. **Execution plans bind to exact decision-event IDs.** If a reviewed decision changes later, the old playlist plan becomes stale rather than silently replaying it.
+6. **History is retained.** Decisions, metadata observations, archive lookups, transcript observations, LLM runs and playlist plans are append-only where practical.
 
 Keep backups of both the original `watch-later.json` and `watchlater.sqlite3`.
 
@@ -75,6 +79,7 @@ Installed commands:
 - `watchlater-llm` — provider setup, first-pass classification, description refinement and stored LLM runs.
 - `watchlater-llm-transcript` — transcript-aware LLM refinement.
 - `watchlater-review` — build a local HTML review report and import explicit human overrides.
+- `watchlater-playlist` — import normal-playlist inventory and persist dry-run move plans/checkpoints.
 
 Most commands default to `watchlater.sqlite3`. Put `--db PATH` before the subcommand when using another catalogue.
 
@@ -482,11 +487,85 @@ watchlater-review import watchlater-review-1.json
 
 Imported overrides become append-only `decision_events` with `source=human-review-report`. The importer rejects foreign/missing video IDs before writing anything and re-importing an identical current review decision is idempotent.
 
-The report does **not** change YouTube. Existing/proposed `move` actions are displayed, but this first review UI only creates `keep`, `review`, `archive` and `delete` overrides; playlist execution remains #10.
+The report does **not** change YouTube. Existing/proposed `move` actions are displayed, but this first review UI only creates `keep`, `review`, `archive` and `delete` overrides.
 
 See [`docs/review.md`](docs/review.md).
 
-## 15. Recommended end-to-end run
+## 15. Plan destination-playlist synchronization
+
+Actual playlist writes are not implemented yet, but move execution now has a persistent dry-run/checkpoint layer.
+
+### Import/refresh normal-playlist inventory
+
+Planning refuses to treat an unknown destination as a missing playlist unless an inventory has been imported first.
+
+Start from the example format:
+
+```bash
+cp examples/playlist-inventory.example.json playlist-inventory.json
+# replace the example IDs/titles/items with a current inventory
+watchlater-playlist inventory import playlist-inventory.json
+watchlater-playlist inventory show
+```
+
+The inventory records normal playlist IDs/titles/privacy and known video membership. Later API/browser inventory refreshers will populate the same cache automatically.
+
+### Build a plan from current `move` decisions
+
+```bash
+watchlater-playlist plan --backend api
+```
+
+Only **current local `move` decisions** are executable input. LLM move proposals do not enter the plan merely because a model suggested them.
+
+Destination handling is conservative:
+
+- exactly one title match in the inventory → existing playlist ID;
+- no title match → `create_planned` (private by default);
+- duplicate matching titles → planning stops as ambiguous.
+
+If the inventory already contains the video in the resolved destination, the item becomes `already_present` and requires no insertion.
+
+### Quota estimate
+
+Current defaults use 50 units for each planned `playlists.insert` and `playlistItems.insert`, with a configurable 10,000-unit allowance:
+
+```bash
+watchlater-playlist plan \
+    --backend api \
+    --quota-limit 10000 \
+    --playlist-create-cost 50 \
+    --playlist-insert-cost 50
+```
+
+If the estimate exceeds the configured allowance, the plan is still persisted/printed for inspection but the CLI returns non-zero unless `--allow-over-quota` is explicitly supplied.
+
+A browser-backend plan uses the same operations/checkpoints but reports zero API-write quota:
+
+```bash
+watchlater-playlist plan --backend browser
+```
+
+### Inspect staleness before future execution
+
+Every planned video stores the exact decision-event ID that authorized its move. If the current decision changes afterward, the old plan item is shown as stale:
+
+```bash
+watchlater-playlist show
+watchlater-playlist show --run-id 4
+```
+
+A future executor must refuse stale items instead of replaying an obsolete move.
+
+You can also write the exact stored plan JSON:
+
+```bash
+watchlater-playlist plan --output playlist-plan.json
+```
+
+This tranche does **not** create playlists or add videos yet. See [`docs/playlist-sync.md`](docs/playlist-sync.md).
+
+## 16. Recommended end-to-end run
 
 ```bash
 # export/import
@@ -526,11 +605,17 @@ watchlater-review build review.html
 watchlater-review import watchlater-review-1.json --dry-run
 watchlater-review import watchlater-review-1.json
 
+# after move destinations have been reviewed and a current normal-playlist
+# inventory has been prepared, build an execution-neutral plan
+watchlater-playlist inventory import playlist-inventory.json
+watchlater-playlist plan --backend api --output playlist-plan.json
+watchlater-playlist show
+
 # inspect remaining work
 watchlater creators --remaining
 ```
 
-## 16. Cache/refresh cheat sheet
+## 17. Cache/refresh and planning cheat sheet
 
 `--refresh` means “perform a new network/provider operation despite a cache”, after selecting the target.
 
@@ -540,19 +625,20 @@ watchlater creators --remaining
 - `watchlater-transcript` — cache keyed by video plus language/automatic-caption policy.
 - LLM first/refinement stages — exact provider + prompt + evidence cache; `--refresh` stores another historical run; `--no-store` bypasses persistence.
 - `watchlater-review import` — identical current `human-review-report` action/reason is treated as unchanged rather than appended again.
+- `watchlater-playlist plan` — creates a new persistent plan from the current decisions and current imported playlist inventory; `show` re-checks those authorizing decision-event IDs for staleness.
 
 When available, use `--dry-run` before a large network/provider/import operation.
 
-## 17. Current limitations
+## 18. Current limitations
 
 - **Selective YouTube execution is not yet implemented.** Local `move`, `archive` and `delete` decisions do not change YouTube.
-- **Playlist synchronization/execution is not yet implemented.** A `move` destination is a plan only.
+- **Playlist synchronization planning/checkpointing is implemented, but the API/OAuth and browser executors are not yet implemented.** An inventory and plan do not prove that an external YouTube write occurred.
 - Transcript escalation uses existing captions only. It deliberately does **not** download/transcribe audio by default.
 - The HTML report is deliberately a local static file; it exports JSON for explicit CLI import rather than running a privileged local web service.
 
 The destructive “clear all Watch Later” browser-console snippet in the main README is separate from this selective workflow and should only be used after keeping an export/backup.
 
-## 18. Detailed documentation
+## 19. Detailed documentation
 
 - [`docs/dearrow.md`](docs/dearrow.md) — DeArrow API, trust rules, privacy and attribution.
 - [`docs/llm.md`](docs/llm.md) — provider configuration, interest profiles and OpenAI-compatible transport.
@@ -560,5 +646,6 @@ The destructive “clear all Watch Later” browser-console snippet in the main 
 - [`docs/rich-metadata.md`](docs/rich-metadata.md) — selective yt-dlp metadata/description enrichment.
 - [`docs/transcripts.md`](docs/transcripts.md) — caption acquisition and transcript-aware refinement.
 - [`docs/review.md`](docs/review.md) — self-contained HTML review and explicit human override import.
+- [`docs/playlist-sync.md`](docs/playlist-sync.md) — playlist inventory, dry-run move planning, quota estimates and checkpoint state.
 
 Use `COMMAND --help` as the definitive option reference for the installed version.
