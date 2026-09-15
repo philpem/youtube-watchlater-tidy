@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from youtube_watchlater_tidy.db import ensure_schema, open_catalogue
+from youtube_watchlater_tidy.db import SCHEMA_VERSION, ensure_schema, open_catalogue
 from youtube_watchlater_tidy.enrichment import latest_found_observation
 from youtube_watchlater_tidy.importer import import_watchlater_json
 from youtube_watchlater_tidy.preservetube import PRESERVETUBE_SOURCE
@@ -345,7 +345,7 @@ class RecoveryTests(unittest.TestCase):
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         conn.close()
-        self.assertEqual(version, 6)
+        self.assertEqual(version, SCHEMA_VERSION)
         self.assertIn("archive_lookups", tables)
         self.assertIn("saved_rules", tables)
         self.assertIn("dearrow_lookups", tables)

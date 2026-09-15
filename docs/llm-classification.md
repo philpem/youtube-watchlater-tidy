@@ -1,8 +1,9 @@
 # LLM classification engine
 
-The first classification engine deliberately prints suggestions without storing them. This
-makes it possible to test providers, prompts, batch sizing and validation against the real
-catalogue before LLM results become persistent evidence.
+LLM classification is a late-stage advisory layer. It operates only after cheap/manual
+triage has reduced the unresolved set, validates every provider response in the
+application, and stores successful suggestions as append-only evidence rather than as
+catalogue decisions.
 
 ## Candidate precedence
 
@@ -26,7 +27,7 @@ The cheap first-pass evidence contains:
 - exact video ID and playlist position;
 - immutable imported YouTube title;
 - recovered historical title/source for unavailable videos, where available;
-- trusted DeArrow alternate title, when the optional DeArrow cache exists;
+- trusted DeArrow alternate title;
 - channel name/ID;
 - duration and view count;
 - enriched upload date and availability where available.
@@ -43,8 +44,8 @@ watchlater-llm --config watchlater.toml --db watchlater.sqlite3 classify \
 
 ## Validation
 
-A normal classification run sends batches through the selected OpenAI-compatible provider
-and then validates the returned JSON again in the application. Among other checks:
+A classification run sends batches through the selected OpenAI-compatible provider and
+then validates the returned JSON again in the application. Among other checks:
 
 - every requested video ID must appear exactly once and no extra IDs are accepted;
 - actions and timeliness values must be from the fixed enums;
@@ -55,14 +56,61 @@ and then validates the returned JSON again in the application. Among other check
 - escalation flags must be booleans;
 - missing or unexpected response fields are rejected.
 
-Validated results are printed as JSON together with the prompt hash, per-batch evidence
-hash, response model and usage information returned by the server:
+## Persistence and exact-run cache
+
+Successful validated runs are stored in schema v7 as three append-only layers:
+
+1. run provenance/cache identity (snapshot, provider fingerprint, prompt/input hashes);
+2. provider batches (input hash, response model, usage and validated response JSON);
+3. per-video evidence hashes/JSON and validated suggestions.
+
+LLM rows are intentionally **not** written to `decision_events`. A later human or saved-rule
+decision therefore outranks the stored suggestion automatically while the historical LLM
+result remains inspectable.
+
+The default `classify` behavior is:
 
 ```bash
-watchlater-llm --config watchlater.toml --db watchlater.sqlite3 classify \
-    --provider ollama-local --limit 20 --batch-size 5
+watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20
 ```
 
-This stage does **not** modify `decision_events` or create playlist operations. Persistent
-LLM classification/cache tables are a separate schema migration after the DeArrow v6
-migration is established on the main branch.
+Before contacting the model it looks for a completed run with the same:
+
+- snapshot/target evidence;
+- provider fingerprint;
+- effective prompt hash.
+
+The provider fingerprint includes provider identity/base URL, model, temperature, output
+token limit, structured-output mode and provider-specific request fields. It deliberately
+does **not** include API-key values, retry count or concurrency.
+
+The evidence hash covers the whole ordered target, including batch-relevant video evidence.
+This deliberately avoids reusing an individual suggestion that was originally generated in
+a different batch context.
+
+On an exact cache hit the stored run is returned without a provider call. Use `--refresh`
+to append a fresh historical run even when an exact cache exists:
+
+```bash
+watchlater-llm --config watchlater.toml classify \
+    --provider openrouter --limit 20 --refresh
+```
+
+Use `--no-store` for the previous ephemeral behavior: it neither checks nor writes the LLM
+cache.
+
+## Inspecting stored results
+
+Show the most recent stored run for the latest/specified snapshot, or an exact run ID:
+
+```bash
+watchlater-llm --config watchlater.toml results
+watchlater-llm --config watchlater.toml results --snapshot 2
+watchlater-llm --config watchlater.toml results --run-id 12
+```
+
+The output includes each historical LLM suggestion plus any **current** human/rule decision
+for the same video. The current decision is joined at read time; it does not rewrite the
+stored classification.
+
+Playlist creation, movement and Watch Later deletion remain separate execution stages.

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from youtube_watchlater_tidy.db import ensure_schema, open_catalogue
+from youtube_watchlater_tidy.db import SCHEMA_VERSION, ensure_schema, open_catalogue
 from youtube_watchlater_tidy.dearrow import (
     candidate_video_ids,
     enrich_dearrow,
@@ -230,7 +230,7 @@ class DeArrowTests(unittest.TestCase):
         self.assertIn(f"/api/branding/{prefix}", row["source_url"])
         self.assertNotIn("video00000A", row["source_url"])
 
-    def test_schema_v5_migrates_to_v6(self) -> None:
+    def test_schema_v5_migrates_to_current_version(self) -> None:
         path = Path(self.tmp.name) / "v5.sqlite3"
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
@@ -239,7 +239,7 @@ class DeArrowTests(unittest.TestCase):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         conn.close()
-        self.assertEqual(version, 6)
+        self.assertEqual(version, SCHEMA_VERSION)
         self.assertIn("dearrow_lookups", objects)
         self.assertIn("preferred_dearrow", objects)
 

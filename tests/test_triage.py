@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from youtube_watchlater_tidy.db import ensure_schema, open_catalogue
+from youtube_watchlater_tidy.db import SCHEMA_VERSION, ensure_schema, open_catalogue
 from youtube_watchlater_tidy.importer import import_watchlater_json
 from youtube_watchlater_tidy.reports import creator_rows, video_rows
 from youtube_watchlater_tidy.triage import (
@@ -127,7 +127,7 @@ class TriageTests(unittest.TestCase):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         conn.close()
-        self.assertEqual(version, 6)
+        self.assertEqual(version, SCHEMA_VERSION)
         self.assertIn("decision_events", objects)
         self.assertIn("selections", objects)
         self.assertIn("metadata_observations", objects)
