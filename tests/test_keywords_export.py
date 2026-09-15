@@ -7,7 +7,7 @@ from pathlib import Path
 
 from youtube_watchlater_tidy.db import open_catalogue
 from youtube_watchlater_tidy.importer import import_watchlater_json
-from youtube_watchlater_tidy.keywords import keyword_rows
+from youtube_watchlater_tidy.keywords import _tokens, keyword_rows
 from youtube_watchlater_tidy.selection_export import selection_export_text
 from youtube_watchlater_tidy.triage import apply_selection_action, select_title
 
@@ -61,6 +61,52 @@ class KeywordAndExportTests(unittest.TestCase):
         phrases = {row.phrase for row in rows}
         self.assertIn("z80 repair", phrases)
         self.assertNotIn("home assistant", phrases)
+
+    def test_contractions_are_single_tokens(self) -> None:
+        self.assertEqual(
+            _tokens("Don't split what’s here — C++ still matters"),
+            ["don't", "split", "what's", "here", "c++", "still", "matters"],
+        )
+
+    def test_common_and_series_bigrams_are_suppressed_by_default(self) -> None:
+        source = self.db_path.parent / "common.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "id": "WL",
+                    "entries": [
+                        {"id": "common00000A", "title": "What's the difference? Reverse engineering part 1"},
+                        {"id": "common00000E", "title": "Here's what happened: reverse engineering part 2"},
+                        {"id": "common00000I", "title": "Don't know what happens in reverse engineering"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with open_catalogue(self.db_path) as conn:
+            snapshot = import_watchlater_json(conn, source).snapshot_id
+            filtered = {
+                row.phrase
+                for row in keyword_rows(conn, snapshot, ngram=2, min_count=1)
+            }
+            raw = {
+                row.phrase
+                for row in keyword_rows(
+                    conn,
+                    snapshot,
+                    ngram=2,
+                    min_count=1,
+                    include_common=True,
+                )
+            }
+
+        self.assertIn("reverse engineering", filtered)
+        self.assertNotIn("what's the", filtered)
+        self.assertNotIn("here's what", filtered)
+        self.assertNotIn("what happens", filtered)
+        self.assertNotIn("part 1", filtered)
+        self.assertIn("here's what", raw)
+        self.assertIn("part 1", raw)
 
     def test_selection_json_and_csv_export(self) -> None:
         with open_catalogue(self.db_path) as conn:
