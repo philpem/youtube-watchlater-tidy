@@ -5,11 +5,18 @@ import json
 import sys
 from pathlib import Path
 
+from .db import open_catalogue
+from .llm_classification import (
+    classification_evidence,
+    classify,
+    evidence_hash,
+)
 from .llm_config import load_project_config
 from .llm_prompt import CLASSIFICATION_SCHEMA, render_prompt, render_prompt_text
 from .llm_provider import chat, parse_json_content
 
 DEFAULT_CONFIG = Path("watchlater.toml")
+DEFAULT_DB = Path("watchlater.sqlite3")
 
 PROBE_SCHEMA = {
     "type": "object",
@@ -22,13 +29,19 @@ PROBE_SCHEMA = {
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="watchlater-llm",
-        description="Configure and inspect OpenAI-compatible Watch Later LLM providers.",
+        description="Configure and run OpenAI-compatible Watch Later LLM triage.",
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG,
         help=f"project TOML config (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB,
+        help=f"SQLite catalogue path (default: {DEFAULT_DB})",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -43,6 +56,23 @@ def _parser() -> argparse.ArgumentParser:
 
     probe = sub.add_parser("probe", help="make a small structured-output test request")
     probe.add_argument("--provider")
+
+    classify_parser = sub.add_parser(
+        "classify",
+        help="classify unresolved videos and print validated suggestions without storing them",
+    )
+    classify_parser.add_argument("--provider")
+    classify_parser.add_argument("--interest-profile")
+    classify_parser.add_argument("--prompt-file", type=Path)
+    classify_parser.add_argument("--snapshot", type=int)
+    classify_parser.add_argument("--selection", type=int)
+    classify_parser.add_argument("--limit", type=int)
+    classify_parser.add_argument("--batch-size", type=int, default=10)
+    classify_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the exact cheap evidence and hashes without making LLM requests",
+    )
     return parser
 
 
@@ -88,7 +118,7 @@ def _cmd_probe(args: argparse.Namespace) -> int:
             },
             {
                 "role": "user",
-                "content": 'Return {"ok": true}. This is a connectivity and structured-output probe.',
+                "content": '{"instruction":"Return an object with ok=true."}',
             },
         ],
         json_schema=PROBE_SCHEMA,
@@ -109,6 +139,65 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_classify(args: argparse.Namespace) -> int:
+    config = load_project_config(args.config)
+    provider = config.provider(args.provider)
+    prompt = render_prompt(
+        config,
+        interest_profile=args.interest_profile,
+        prompt_file=args.prompt_file,
+    )
+    with open_catalogue(args.db) as conn:
+        videos = classification_evidence(
+            conn,
+            args.snapshot,
+            selection_id=args.selection,
+            limit=args.limit,
+        )
+
+    if not videos:
+        print("No unresolved videos match the classification target.")
+        return 0
+
+    if args.dry_run:
+        output = {
+            "provider": provider.name,
+            "model": provider.model,
+            "prompt_sha256": prompt.sha256,
+            "evidence_sha256": evidence_hash(videos),
+            "video_count": len(videos),
+            "videos": [video.as_payload() for video in videos],
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    result = classify(
+        provider,
+        prompt,
+        videos,
+        playlists=set(config.playlists),
+        batch_size=args.batch_size,
+    )
+    output = {
+        "provider": provider.name,
+        "configured_model": provider.model,
+        "prompt_sha256": prompt.sha256,
+        "video_count": len(result.suggestions),
+        "classifications": [item.as_payload() for item in result.suggestions],
+        "batches": [
+            {
+                "input_sha256": batch.input_sha256,
+                "response_model": batch.response_model,
+                "usage": batch.usage,
+                "video_ids": [item.video_id for item in batch.suggestions],
+            }
+            for batch in result.batches
+        ],
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -119,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_prompt(args)
         if args.command == "probe":
             return _cmd_probe(args)
+        if args.command == "classify":
+            return _cmd_classify(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"watchlater-llm: error: {exc}", file=sys.stderr)
         return 2
