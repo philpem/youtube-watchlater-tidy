@@ -10,5 +10,6 @@ Focused reference notes:
 - [`rich-metadata.md`](rich-metadata.md) — selective yt-dlp rich metadata/description enrichment.
 - [`transcripts.md`](transcripts.md) — selective caption acquisition plus transcript-aware LLM refinement.
 - [`review.md`](review.md) — self-contained HTML human review and explicit override import.
+- [`playlist-sync.md`](playlist-sync.md) — destination-playlist inventory, dry-run planning, checkpoint state and quota estimates.
 
 The user guide distinguishes implemented behavior from planned work. `COMMAND --help` is the definitive option reference for the installed version.

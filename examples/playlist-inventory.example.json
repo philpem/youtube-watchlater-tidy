@@ -1,0 +1,25 @@
+{
+  "format": "youtube-watchlater-tidy-playlist-inventory-v1",
+  "source": "manual-example",
+  "fetched_at": "2026-09-15T12:00:00+00:00",
+  "playlists": [
+    {
+      "playlist_id": "PL_EXAMPLE_ELECTRONICS",
+      "title": "Queue - Electronics",
+      "privacy_status": "private",
+      "items": [
+        {
+          "video_id": "dQw4w9WgXcQ",
+          "playlist_item_id": "PLI_EXAMPLE_1",
+          "position": 0
+        }
+      ]
+    },
+    {
+      "playlist_id": "PL_EXAMPLE_RETRO",
+      "title": "Queue - Retrocomputing",
+      "privacy_status": "private",
+      "items": []
+    }
+  ]
+}
