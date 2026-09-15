@@ -14,6 +14,14 @@ from .llm_classification import (
 from .llm_config import load_project_config
 from .llm_prompt import CLASSIFICATION_SCHEMA, render_prompt, render_prompt_text
 from .llm_provider import chat, parse_json_content
+from .llm_store import (
+    cached_run_id,
+    classification_cache_key,
+    latest_run_id,
+    resolve_snapshot_id,
+    run_payload,
+    store_run,
+)
 
 DEFAULT_CONFIG = Path("watchlater.toml")
 DEFAULT_DB = Path("watchlater.sqlite3")
@@ -59,7 +67,7 @@ def _parser() -> argparse.ArgumentParser:
 
     classify_parser = sub.add_parser(
         "classify",
-        help="classify unresolved videos and print validated suggestions without storing them",
+        help="classify unresolved videos, caching validated suggestions as advisory evidence",
     )
     classify_parser.add_argument("--provider")
     classify_parser.add_argument("--interest-profile")
@@ -69,10 +77,27 @@ def _parser() -> argparse.ArgumentParser:
     classify_parser.add_argument("--limit", type=int)
     classify_parser.add_argument("--batch-size", type=int, default=10)
     classify_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="ignore an exact cached run and append a fresh classification run",
+    )
+    classify_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="call the provider and print validated suggestions without reading/writing the LLM cache",
+    )
+    classify_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the exact cheap evidence and hashes without making LLM requests",
     )
+
+    results_parser = sub.add_parser(
+        "results",
+        help="show a stored LLM classification run and current human/rule precedence",
+    )
+    results_parser.add_argument("--run-id", type=int)
+    results_parser.add_argument("--snapshot", type=int)
     return parser
 
 
@@ -139,7 +164,31 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ephemeral_payload(provider, prompt, videos, result) -> dict:
+    return {
+        "cache": "disabled",
+        "provider": provider.name,
+        "configured_model": provider.model,
+        "prompt_sha256": prompt.sha256,
+        "input_sha256": evidence_hash(videos),
+        "video_count": len(result.suggestions),
+        "classifications": [item.as_payload() for item in result.suggestions],
+        "batches": [
+            {
+                "input_sha256": batch.input_sha256,
+                "response_model": batch.response_model,
+                "usage": batch.usage,
+                "video_ids": [item.video_id for item in batch.suggestions],
+            }
+            for batch in result.batches
+        ],
+    }
+
+
 def _cmd_classify(args: argparse.Namespace) -> int:
+    if args.refresh and args.no_store:
+        raise ValueError("--refresh is meaningless with --no-store")
+
     config = load_project_config(args.config)
     provider = config.provider(args.provider)
     prompt = render_prompt(
@@ -148,12 +197,30 @@ def _cmd_classify(args: argparse.Namespace) -> int:
         prompt_file=args.prompt_file,
     )
     with open_catalogue(args.db) as conn:
+        snapshot_id = resolve_snapshot_id(conn, args.snapshot, args.selection)
         videos = classification_evidence(
             conn,
-            args.snapshot,
+            snapshot_id,
             selection_id=args.selection,
             limit=args.limit,
         )
+        provider_sha, input_sha, cache_key = classification_cache_key(
+            provider, prompt, videos
+        ) if videos else (None, None, None)
+
+        if videos and not args.dry_run and not args.no_store and not args.refresh:
+            cached = cached_run_id(
+                conn,
+                snapshot_id=snapshot_id,
+                provider_sha256=provider_sha,
+                prompt_sha256=prompt.sha256,
+                input_sha256=input_sha,
+            )
+            if cached is not None:
+                output = run_payload(conn, cached)
+                output["cache"] = "hit"
+                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                return 0
 
     if not videos:
         print("No unresolved videos match the classification target.")
@@ -161,10 +228,13 @@ def _cmd_classify(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         output = {
+            "cache": "not-queried",
+            "cache_key": cache_key,
             "provider": provider.name,
             "model": provider.model,
+            "provider_sha256": provider_sha,
             "prompt_sha256": prompt.sha256,
-            "evidence_sha256": evidence_hash(videos),
+            "input_sha256": input_sha,
             "video_count": len(videos),
             "videos": [video.as_payload() for video in videos],
         }
@@ -178,22 +248,40 @@ def _cmd_classify(args: argparse.Namespace) -> int:
         playlists=set(config.playlists),
         batch_size=args.batch_size,
     )
-    output = {
-        "provider": provider.name,
-        "configured_model": provider.model,
-        "prompt_sha256": prompt.sha256,
-        "video_count": len(result.suggestions),
-        "classifications": [item.as_payload() for item in result.suggestions],
-        "batches": [
-            {
-                "input_sha256": batch.input_sha256,
-                "response_model": batch.response_model,
-                "usage": batch.usage,
-                "video_ids": [item.video_id for item in batch.suggestions],
-            }
-            for batch in result.batches
-        ],
-    }
+
+    if args.no_store:
+        print(
+            json.dumps(
+                _ephemeral_payload(provider, prompt, videos, result),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    with open_catalogue(args.db) as conn:
+        run_id = store_run(
+            conn,
+            snapshot_id=snapshot_id,
+            selection_id=args.selection,
+            provider=provider,
+            prompt=prompt,
+            videos=videos,
+            result=result,
+        )
+        output = run_payload(conn, run_id)
+    output["cache"] = "refresh" if args.refresh else "miss"
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_results(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        run_id = args.run_id
+        if run_id is None:
+            run_id = latest_run_id(conn, args.snapshot)
+        output = run_payload(conn, run_id)
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
@@ -210,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_probe(args)
         if args.command == "classify":
             return _cmd_classify(args)
+        if args.command == "results":
+            return _cmd_results(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"watchlater-llm: error: {exc}", file=sys.stderr)
         return 2
