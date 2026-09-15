@@ -40,8 +40,12 @@ LLM first pass over unresolved videos
                           |                                     |
                           v                                     |
                   transcript-aware LLM child run --------------+
+                                                               |
                                                                v
-                                                     human review / execution
+                                                   local human review
+                                                               |
+                                                               v
+                                               later YouTube execution
 ```
 
 Safety rules:
@@ -69,7 +73,8 @@ Installed commands:
 - `watchlater-metadata` — selective full yt-dlp metadata/description enrichment.
 - `watchlater-transcript` — selective existing-caption acquisition.
 - `watchlater-llm` — provider setup, first-pass classification, description refinement and stored LLM runs.
-- `watchlater-llm-transcript` — final transcript-aware LLM refinement.
+- `watchlater-llm-transcript` — transcript-aware LLM refinement.
+- `watchlater-review` — build a local HTML review report and import explicit human overrides.
 
 Most commands default to `watchlater.sqlite3`. Put `--db PATH` before the subcommand when using another catalogue.
 
@@ -254,23 +259,12 @@ watchlater-dearrow enrich --selection 12
 watchlater-dearrow enrich --video-id VIDEO_ID
 ```
 
-Inspect one result:
+Inspect/cache controls:
 
 ```bash
 watchlater-dearrow show VIDEO_ID
-watchlater-dearrow show VIDEO_ID --raw
-```
-
-Cache controls:
-
-```bash
 watchlater-dearrow enrich --all --max-age 7d
 watchlater-dearrow enrich --video-id VIDEO_ID --refresh
-```
-
-Privacy-preserving hash-prefix lookup:
-
-```bash
 watchlater-dearrow enrich --all --remaining --hash-prefix
 ```
 
@@ -302,7 +296,7 @@ Default endpoint: `http://127.0.0.1:11434/v1`.
 
 ### Unsloth models
 
-Serve the exported model through an OpenAI-compatible engine such as vLLM, llama-server or Ollama:
+Serve an exported Unsloth model through an OpenAI-compatible engine such as vLLM, llama-server or Ollama:
 
 ```toml
 [providers.unsloth-local]
@@ -328,8 +322,6 @@ X-Title = 'youtube-watchlater-tidy'
 ```bash
 export OPENROUTER_API_KEY='...'
 ```
-
-The OpenRouter preset uses `https://openrouter.ai/api/v1` and `OPENROUTER_API_KEY` by default.
 
 ### Generic OpenAI-compatible endpoint
 
@@ -370,21 +362,13 @@ watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --batch-size 5
 ```
 
-Use another configured provider simply by changing `--provider`.
-
 The classifier considers unresolved videos only and returns validated suggestions including action, topic/content type, timeliness, confidence/quality, destination proposal, `needs_description`, and `needs_transcript`.
 
-Normal classification uses an exact-run cache keyed by output-affecting provider settings, prompt hash and the whole ordered evidence target. API-key values are not part of the fingerprint.
+Normal classification uses an exact-run cache keyed by output-affecting provider settings, prompt hash and the whole ordered evidence target.
 
 ```bash
-# force another append-only run
 watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20 --refresh
-
-# provider call without reading/writing the LLM cache
 watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20 --no-store
-
-# inspect stored history
-watchlater-llm --config watchlater.toml results
 watchlater-llm --config watchlater.toml results --run-id 12
 ```
 
@@ -401,28 +385,18 @@ watchlater-metadata enrich --llm-needs-description --run-id 12 --dry-run
 watchlater-metadata enrich --llm-needs-description --run-id 12
 ```
 
-No media is downloaded. yt-dlp metadata is stored as append-only evidence.
-
-Inspect a result:
-
-```bash
-watchlater-metadata show VIDEO_ID
-watchlater-metadata show VIDEO_ID --raw
-```
-
 Then reclassify exactly that parent run:
 
 ```bash
 watchlater-llm --config watchlater.toml refine-description \
     --run-id 12 --provider ollama-local --dry-run
-
 watchlater-llm --config watchlater.toml refine-description \
     --run-id 12 --provider ollama-local
 ```
 
 The child input contains the previous evidence/classification plus description and provenance. Descriptions are capped at 4000 characters by default; use `--max-description-chars` to change that.
 
-The child result is another append-only LLM run with context containing `stage=description_refinement` and `parent_run_id=12`. The original run remains unchanged.
+The child result is another append-only LLM run with `stage=description_refinement` and `parent_run_id` in its context.
 
 ## 12. Caption/transcript acquisition
 
@@ -433,13 +407,7 @@ watchlater-transcript fetch --llm-needs-transcript --run-id 18 --dry-run
 watchlater-transcript fetch --llm-needs-transcript --run-id 18
 ```
 
-The default policy is:
-
-1. matching manual/normal subtitles first;
-2. matching automatic captions as fallback;
-3. otherwise cache `not_found`.
-
-Missing captions are **not** treated as evidence of poor video quality.
+The default policy is manual subtitles first, then matching automatic captions as fallback, otherwise cached `not_found`. Missing captions are **not** treated as evidence of poor video quality.
 
 Ordered language preferences can be supplied:
 
@@ -452,18 +420,11 @@ Disable automatic captions with `--no-auto`.
 
 No video/audio is downloaded. The cache retains normalized transcript text, segments/timestamps, source type, language, format, raw caption payload, fetch time and request-policy hash.
 
-Inspect cached evidence:
-
-```bash
-watchlater-transcript show VIDEO_ID
-watchlater-transcript show VIDEO_ID --raw
-```
-
 See [`docs/transcripts.md`](docs/transcripts.md).
 
 ## 13. Transcript-aware LLM refinement
 
-After captions have been cached for parent run 18, inspect the final refinement evidence:
+After captions have been cached for parent run 18:
 
 ```bash
 watchlater-llm-transcript \
@@ -471,22 +432,16 @@ watchlater-llm-transcript \
     --run-id 18 \
     --provider ollama-local \
     --dry-run
-```
 
-Then run it:
-
-```bash
 watchlater-llm-transcript \
     --config watchlater.toml \
     --run-id 18 \
     --provider ollama-local
 ```
 
-Only parent-run rows that both have `needs_transcript=true` and remain unresolved are eligible. Videos with no successful cached transcript are reported and skipped; the prior classification remains intact.
+Only parent-run rows that both have `needs_transcript=true` and remain unresolved are eligible. Videos with no successful cached transcript are reported and skipped.
 
-The model receives previous evidence, previous validated classification, transcript text and transcript provenance. Manual/automatic source type is explicit so automatic-caption errors can be considered.
-
-Long transcripts default to a 12,000-character context budget. Instead of taking only the front, the tool samples the **beginning, middle and end** deterministically:
+Long transcripts default to a 12,000-character model-side budget. The tool samples the **beginning, middle and end** deterministically rather than taking only the front:
 
 ```bash
 watchlater-llm-transcript \
@@ -495,20 +450,43 @@ watchlater-llm-transcript \
     --max-transcript-chars 24000
 ```
 
-The original cached transcript is never truncated. Changing the character budget changes the evidence hash/cache key.
+The original cached transcript remains untouched. Changing the budget changes the evidence hash/cache key. The result is another append-only child run with `stage=transcript_refinement` and `parent_run_id` in its context.
 
-The result is another append-only LLM child run with context containing `stage=transcript_refinement`, `parent_run_id` and the transcript budget. Human/rule decisions continue to outrank it.
+## 14. Human review report
 
-Cache controls mirror the other LLM stages:
+After cheap rules and LLM refinement have done the bulk work, generate a self-contained local report:
 
 ```bash
-watchlater-llm-transcript --config watchlater.toml --run-id 18 --refresh
-watchlater-llm-transcript --config watchlater.toml --run-id 18 --no-store
+watchlater-review build review.html
 ```
 
-See [`docs/transcripts.md`](docs/transcripts.md) and [`docs/llm-classification.md`](docs/llm-classification.md).
+Open `review.html` in a normal browser. The report shows imported/recovered/DeArrow metadata, channel/duration/views, the **current human/rule decision**, and the **latest stored LLM suggestion** in separate columns.
 
-## 14. Recommended end-to-end run
+The page supports search/filtering by current action, LLM action, topic and maximum confidence, plus sorting by position, confidence or views.
+
+For each row, choose an explicit human override (`keep`, `review`, `archive` or `delete`) and optionally add a note. Rows left at `no override` are not exported.
+
+Press **Export explicit overrides**. The page downloads a versioned JSON file containing the snapshot ID and exact video IDs you explicitly reviewed.
+
+Validate it before writing SQLite:
+
+```bash
+watchlater-review import watchlater-review-1.json --dry-run
+```
+
+Then apply:
+
+```bash
+watchlater-review import watchlater-review-1.json
+```
+
+Imported overrides become append-only `decision_events` with `source=human-review-report`. The importer rejects foreign/missing video IDs before writing anything and re-importing an identical current review decision is idempotent.
+
+The report does **not** change YouTube. Existing/proposed `move` actions are displayed, but this first review UI only creates `keep`, `review`, `archive` and `delete` overrides; playlist execution remains #10.
+
+See [`docs/review.md`](docs/review.md).
+
+## 15. Recommended end-to-end run
 
 ```bash
 # export/import
@@ -530,26 +508,29 @@ watchlater-dearrow enrich --all --remaining
 
 # first-pass LLM
 watchlater-llm --config watchlater.toml classify \
-    --provider ollama-local --limit 20 --dry-run
-watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --batch-size 5
 
-# suppose the stored first-pass run is 12
+# suppose the first-pass run is 12
 watchlater-metadata enrich --llm-needs-description --run-id 12
 watchlater-llm --config watchlater.toml refine-description \
     --run-id 12 --provider ollama-local
 
-# suppose the description-refinement child run is 18
+# suppose the description child run is 18
 watchlater-transcript fetch --llm-needs-transcript --run-id 18
 watchlater-llm-transcript --config watchlater.toml \
     --run-id 18 --provider ollama-local
 
-# inspect the newest child run and continue human decisions
-watchlater-llm --config watchlater.toml results
+# review the catalogue locally and import explicit overrides
+watchlater-review build review.html
+# ... review in browser and export JSON ...
+watchlater-review import watchlater-review-1.json --dry-run
+watchlater-review import watchlater-review-1.json
+
+# inspect remaining work
 watchlater creators --remaining
 ```
 
-## 15. Cache/refresh cheat sheet
+## 16. Cache/refresh cheat sheet
 
 `--refresh` means “perform a new network/provider operation despite a cache”, after selecting the target.
 
@@ -557,25 +538,27 @@ watchlater creators --remaining
 - `watchlater-dearrow` — cache found/not-found; `--max-age` supplies TTL behavior.
 - `watchlater-metadata` — cache successful yt-dlp metadata observations.
 - `watchlater-transcript` — cache keyed by video plus language/automatic-caption policy.
-- `watchlater-llm classify` / `refine-description` / `watchlater-llm-transcript` — exact provider + prompt + evidence cache; `--refresh` stores another historical run; `--no-store` bypasses persistence.
+- LLM first/refinement stages — exact provider + prompt + evidence cache; `--refresh` stores another historical run; `--no-store` bypasses persistence.
+- `watchlater-review import` — identical current `human-review-report` action/reason is treated as unchanged rather than appended again.
 
-When available, use `--dry-run` before a large network/provider operation.
+When available, use `--dry-run` before a large network/provider/import operation.
 
-## 16. Current limitations
+## 17. Current limitations
 
 - **Selective YouTube execution is not yet implemented.** Local `move`, `archive` and `delete` decisions do not change YouTube.
 - **Playlist synchronization/execution is not yet implemented.** A `move` destination is a plan only.
-- **The local HTML/human-review report is not yet implemented.** Use CLI reports, exports and stored LLM results meanwhile.
 - Transcript escalation uses existing captions only. It deliberately does **not** download/transcribe audio by default.
+- The HTML report is deliberately a local static file; it exports JSON for explicit CLI import rather than running a privileged local web service.
 
 The destructive “clear all Watch Later” browser-console snippet in the main README is separate from this selective workflow and should only be used after keeping an export/backup.
 
-## 17. Detailed documentation
+## 18. Detailed documentation
 
 - [`docs/dearrow.md`](docs/dearrow.md) — DeArrow API, trust rules, privacy and attribution.
 - [`docs/llm.md`](docs/llm.md) — provider configuration, interest profiles and OpenAI-compatible transport.
 - [`docs/llm-classification.md`](docs/llm-classification.md) — evidence, validation, append-only LLM history and exact-run caching.
 - [`docs/rich-metadata.md`](docs/rich-metadata.md) — selective yt-dlp metadata/description enrichment.
 - [`docs/transcripts.md`](docs/transcripts.md) — caption acquisition and transcript-aware refinement.
+- [`docs/review.md`](docs/review.md) — self-contained HTML review and explicit human override import.
 
 Use `COMMAND --help` as the definitive option reference for the installed version.
