@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 watchlater = "youtube_watchlater_tidy.cli:main"
+watchlater-dearrow = "youtube_watchlater_tidy.dearrow_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

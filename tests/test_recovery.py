@@ -345,9 +345,10 @@ class RecoveryTests(unittest.TestCase):
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         conn.close()
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
         self.assertIn("archive_lookups", tables)
         self.assertIn("saved_rules", tables)
+        self.assertIn("dearrow_lookups", tables)
 
 
 if __name__ == "__main__":
