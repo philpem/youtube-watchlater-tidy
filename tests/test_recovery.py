@@ -333,7 +333,7 @@ class RecoveryTests(unittest.TestCase):
                     video_id="not-here",
                 )
 
-    def test_schema_v3_migrates_to_v4(self) -> None:
+    def test_schema_v3_migrates_to_current_version(self) -> None:
         path = self.root / "v3.sqlite3"
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
@@ -345,8 +345,9 @@ class RecoveryTests(unittest.TestCase):
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         conn.close()
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         self.assertIn("archive_lookups", tables)
+        self.assertIn("saved_rules", tables)
 
 
 if __name__ == "__main__":

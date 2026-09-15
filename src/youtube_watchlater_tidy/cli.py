@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -23,6 +24,13 @@ from .reports import (
     render_creators,
     render_videos,
     video_rows,
+)
+from .rules import (
+    apply_enabled_rules,
+    apply_rule,
+    save_rule_from_selection,
+    saved_rules,
+    set_rule_enabled,
 )
 from .selection_export import selection_export_text
 from .triage import (
@@ -267,6 +275,38 @@ def _build_parser() -> argparse.ArgumentParser:
     selection_export.add_argument("--id", type=int, dest="selection_id")
     selection_export.add_argument("--format", choices=("json", "csv"), default="json")
     selection_export.add_argument("--output", type=Path, help="output file (default: stdout)")
+
+    selection_save_rule = selection_sub.add_parser(
+        "save-rule",
+        help="save the current selection selector as a reusable rule",
+    )
+    selection_save_rule.add_argument("name")
+    selection_save_rule.add_argument("action", choices=ACTIONS)
+    selection_save_rule.add_argument("--playlist", help="destination playlist; required for move")
+    selection_save_rule.add_argument("--priority", type=int, default=100)
+    selection_save_rule.add_argument("--snapshot", type=int)
+    selection_save_rule.add_argument("--id", type=int, dest="selection_id")
+
+    rules_parser = subparsers.add_parser("rules", help="manage reusable triage rules")
+    rules_sub = rules_parser.add_subparsers(dest="rules_command", required=True)
+
+    rules_list = rules_sub.add_parser("list", help="list saved rules")
+    rules_list.add_argument("--enabled-only", action="store_true")
+
+    rules_enable = rules_sub.add_parser("enable", help="enable one saved rule")
+    rules_enable.add_argument("rule_id", type=int, metavar="ID")
+
+    rules_disable = rules_sub.add_parser("disable", help="disable one saved rule")
+    rules_disable.add_argument("rule_id", type=int, metavar="ID")
+
+    rules_apply = rules_sub.add_parser("apply", help="apply saved rules to unresolved videos")
+    rules_apply.add_argument("--id", type=int, dest="rule_id", help="apply only one rule")
+    rules_apply.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
+    rules_apply.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="create preview selections but do not record decisions",
+    )
 
     return parser
 
@@ -519,6 +559,37 @@ def _render_selection(rows: list, limit: int | None = None) -> str:
     return "\n".join(output)
 
 
+def _render_rules(rows) -> str:
+    headers = ["ID", "On", "Priority", "Action", "Name", "Selector"]
+    data: list[list[str]] = []
+    for rule in rows:
+        action = rule.action
+        if rule.destination_playlist:
+            action = f"{action}->{rule.destination_playlist}"
+        data.append(
+            [
+                str(rule.id),
+                "yes" if rule.enabled else "no",
+                str(rule.priority),
+                action,
+                rule.name,
+                f"{rule.selector_type}:{json.dumps(rule.selector, ensure_ascii=False, sort_keys=True)}",
+            ]
+        )
+    widths = [len(header) for header in headers]
+    for item in data:
+        for index, value in enumerate(item):
+            widths[index] = max(widths[index], len(value))
+
+    def line(values: list[str]) -> str:
+        return "  ".join(value.ljust(widths[index]) for index, value in enumerate(values)).rstrip()
+
+    output = [line(headers), line(["-" * width for width in widths])]
+    output.extend(line(item) for item in data)
+    output.append(f"{len(data)} rule(s)")
+    return "\n".join(output)
+
+
 def _cmd_select(args: argparse.Namespace) -> int:
     filters = dict(
         snapshot_id=args.snapshot,
@@ -584,7 +655,54 @@ def _cmd_selection(args: argparse.Namespace) -> int:
             else:
                 print(text, end="")
             return 0
+        if args.selection_command == "save-rule":
+            rule_id = save_rule_from_selection(
+                conn,
+                selection_id,
+                name=args.name,
+                action=args.action,
+                destination_playlist=args.playlist,
+                priority=args.priority,
+            )
+            print(f"Selection {selection_id}: saved rule {rule_id} ({args.name})")
+            return 0
     raise RuntimeError("unreachable selection command")
+
+
+def _cmd_rules(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        if args.rules_command == "list":
+            print(_render_rules(saved_rules(conn, enabled_only=args.enabled_only)))
+            return 0
+        if args.rules_command == "enable":
+            set_rule_enabled(conn, args.rule_id, True)
+            print(f"Rule {args.rule_id}: enabled")
+            return 0
+        if args.rules_command == "disable":
+            set_rule_enabled(conn, args.rule_id, False)
+            print(f"Rule {args.rule_id}: disabled")
+            return 0
+        if args.rules_command == "apply":
+            commit = not args.dry_run
+            if args.rule_id is not None:
+                results = [apply_rule(conn, args.rule_id, args.snapshot, commit=commit)]
+            else:
+                results = apply_enabled_rules(conn, args.snapshot, commit=commit)
+            for result in results:
+                if args.dry_run:
+                    print(
+                        f"Rule {result.rule_id} ({result.name}): would match {result.matched} video(s) "
+                        f"via selection {result.selection_id}"
+                    )
+                else:
+                    print(
+                        f"Rule {result.rule_id} ({result.name}): matched {result.matched}, "
+                        f"applied {result.applied} via selection {result.selection_id}"
+                    )
+            if not results:
+                print("No enabled rules.")
+            return 0
+    raise RuntimeError("unreachable rules command")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -612,7 +730,9 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_select(args)
         if args.command == "selection":
             return _cmd_selection(args)
-    except (OSError, ValueError, RuntimeError) as exc:
+        if args.command == "rules":
+            return _cmd_rules(args)
+    except (OSError, ValueError, RuntimeError, sqlite3.IntegrityError) as exc:
         print(f"watchlater: error: {exc}", file=sys.stderr)
         return 2
 

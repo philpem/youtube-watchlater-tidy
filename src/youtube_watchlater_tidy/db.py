@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -155,6 +155,23 @@ CREATE TABLE IF NOT EXISTS archive_lookups (
 
 CREATE INDEX IF NOT EXISTS idx_archive_lookups_video_backend
     ON archive_lookups(video_id, backend, id);
+
+CREATE TABLE IF NOT EXISTS saved_rules (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    priority INTEGER NOT NULL DEFAULT 100,
+    selector_type TEXT NOT NULL CHECK(selector_type IN ('creator', 'title')),
+    selector_json TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('keep', 'review', 'archive', 'delete', 'move')),
+    destination_playlist TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK((action = 'move' AND destination_playlist IS NOT NULL) OR action != 'move')
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_rules_enabled_priority
+    ON saved_rules(enabled, priority, id);
 """
 
 MIGRATION_1_TO_2 = """
@@ -262,6 +279,25 @@ CREATE INDEX IF NOT EXISTS idx_archive_lookups_video_backend
     ON archive_lookups(video_id, backend, id);
 """
 
+MIGRATION_4_TO_5 = """
+CREATE TABLE IF NOT EXISTS saved_rules (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    priority INTEGER NOT NULL DEFAULT 100,
+    selector_type TEXT NOT NULL CHECK(selector_type IN ('creator', 'title')),
+    selector_json TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('keep', 'review', 'archive', 'delete', 'move')),
+    destination_playlist TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK((action = 'move' AND destination_playlist IS NOT NULL) OR action != 'move')
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_rules_enabled_priority
+    ON saved_rules(enabled, priority, id);
+"""
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
@@ -303,20 +339,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_1_TO_2)
             conn.executescript(MIGRATION_2_TO_3)
             conn.executescript(MIGRATION_3_TO_4)
-            conn.execute("PRAGMA user_version = 4")
+            conn.executescript(MIGRATION_4_TO_5)
+            conn.execute("PRAGMA user_version = 5")
         return
 
     if version == 2:
         with conn:
             conn.executescript(MIGRATION_2_TO_3)
             conn.executescript(MIGRATION_3_TO_4)
-            conn.execute("PRAGMA user_version = 4")
+            conn.executescript(MIGRATION_4_TO_5)
+            conn.execute("PRAGMA user_version = 5")
         return
 
     if version == 3:
         with conn:
             conn.executescript(MIGRATION_3_TO_4)
-            conn.execute("PRAGMA user_version = 4")
+            conn.executescript(MIGRATION_4_TO_5)
+            conn.execute("PRAGMA user_version = 5")
+        return
+
+    if version == 4:
+        with conn:
+            conn.executescript(MIGRATION_4_TO_5)
+            conn.execute("PRAGMA user_version = 5")
         return
 
     if version != SCHEMA_VERSION:
