@@ -14,6 +14,10 @@ from .llm_classification import (
 from .llm_config import load_project_config
 from .llm_prompt import CLASSIFICATION_SCHEMA, render_prompt, render_prompt_text
 from .llm_provider import chat, parse_json_content
+from .llm_refinement import (
+    description_refinement_evidence,
+    description_refinement_prompt,
+)
 from .llm_store import (
     cached_run_id,
     classification_cache_key,
@@ -90,6 +94,38 @@ def _parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="print the exact cheap evidence and hashes without making LLM requests",
+    )
+
+    refine_parser = sub.add_parser(
+        "refine-description",
+        help="reclassify one stored run's needs_description videos using fetched descriptions",
+    )
+    refine_parser.add_argument("--run-id", type=int, required=True, help="parent LLM run to refine")
+    refine_parser.add_argument("--provider")
+    refine_parser.add_argument("--interest-profile")
+    refine_parser.add_argument("--prompt-file", type=Path)
+    refine_parser.add_argument("--limit", type=int)
+    refine_parser.add_argument("--batch-size", type=int, default=5)
+    refine_parser.add_argument(
+        "--max-description-chars",
+        type=int,
+        default=4000,
+        help="maximum description characters sent per video (default: 4000)",
+    )
+    refine_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="ignore an exact cached refinement and append a fresh child run",
+    )
+    refine_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="call the provider without reading/writing the LLM run cache",
+    )
+    refine_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show refinement evidence without making provider requests",
     )
 
     results_parser = sub.add_parser(
@@ -276,6 +312,123 @@ def _cmd_classify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_refine_description(args: argparse.Namespace) -> int:
+    if args.refresh and args.no_store:
+        raise ValueError("--refresh is meaningless with --no-store")
+
+    config = load_project_config(args.config)
+    provider = config.provider(args.provider)
+    base_prompt = render_prompt(
+        config,
+        interest_profile=args.interest_profile,
+        prompt_file=args.prompt_file,
+    )
+    prompt = description_refinement_prompt(base_prompt)
+
+    with open_catalogue(args.db) as conn:
+        target = description_refinement_evidence(
+            conn,
+            args.run_id,
+            limit=args.limit,
+            max_description_chars=args.max_description_chars,
+        )
+        videos = list(target.videos)
+        provider_sha, input_sha, cache_key = classification_cache_key(
+            provider, prompt, videos
+        ) if videos else (None, None, None)
+
+        if videos and not args.dry_run and not args.no_store and not args.refresh:
+            cached = cached_run_id(
+                conn,
+                snapshot_id=target.snapshot_id,
+                provider_sha256=provider_sha,
+                prompt_sha256=prompt.sha256,
+                input_sha256=input_sha,
+            )
+            if cached is not None:
+                output = run_payload(conn, cached)
+                output["cache"] = "hit"
+                output["missing_description_video_ids"] = list(
+                    target.missing_description_video_ids
+                )
+                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                return 0
+
+    if not videos:
+        if target.missing_description_video_ids:
+            print(
+                "No requested descriptions are available yet. Fetch them with "
+                f"`watchlater-metadata enrich --llm-needs-description --run-id {args.run_id}`."
+            )
+        else:
+            print("No unresolved needs_description videos remain in that LLM run.")
+        return 0
+
+    if target.missing_description_video_ids:
+        print(
+            f"warning: {len(target.missing_description_video_ids)} video(s) still have no "
+            "description and will not be refined",
+            file=sys.stderr,
+        )
+
+    if args.dry_run:
+        output = {
+            "cache": "not-queried",
+            "cache_key": cache_key,
+            "stage": "description_refinement",
+            "parent_run_id": target.parent_run_id,
+            "provider": provider.name,
+            "model": provider.model,
+            "provider_sha256": provider_sha,
+            "prompt_sha256": prompt.sha256,
+            "input_sha256": input_sha,
+            "video_count": len(videos),
+            "missing_description_video_ids": list(target.missing_description_video_ids),
+            "videos": [video.as_payload() for video in videos],
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    result = classify(
+        provider,
+        prompt,
+        videos,
+        playlists=set(config.playlists),
+        batch_size=args.batch_size,
+    )
+
+    if args.no_store:
+        output = _ephemeral_payload(provider, prompt, videos, result)
+        output["stage"] = "description_refinement"
+        output["parent_run_id"] = target.parent_run_id
+        output["missing_description_video_ids"] = list(
+            target.missing_description_video_ids
+        )
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    context = {
+        "stage": "description_refinement",
+        "parent_run_id": target.parent_run_id,
+        "max_description_chars": args.max_description_chars,
+    }
+    with open_catalogue(args.db) as conn:
+        run_id = store_run(
+            conn,
+            snapshot_id=target.snapshot_id,
+            provider=provider,
+            prompt=prompt,
+            videos=videos,
+            result=result,
+            context=context,
+        )
+        output = run_payload(conn, run_id)
+    output["cache"] = "refresh" if args.refresh else "miss"
+    output["missing_description_video_ids"] = list(target.missing_description_video_ids)
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def _cmd_results(args: argparse.Namespace) -> int:
     with open_catalogue(args.db) as conn:
         run_id = args.run_id
@@ -298,6 +451,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_probe(args)
         if args.command == "classify":
             return _cmd_classify(args)
+        if args.command == "refine-description":
+            return _cmd_refine_description(args)
         if args.command == "results":
             return _cmd_results(args)
     except (OSError, ValueError, RuntimeError) as exc:

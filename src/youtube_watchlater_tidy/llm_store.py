@@ -3,12 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
 from .llm_classification import (
-    ClassificationEvidence,
     ClassificationRunResult,
     ClassificationSuggestion,
     evidence_hash,
@@ -47,14 +45,14 @@ def provider_fingerprint(provider: ProviderConfig) -> str:
     )
 
 
-def evidence_item_hash(video: ClassificationEvidence) -> str:
+def evidence_item_hash(video: Any) -> str:
     return _canonical_hash(video.as_payload())
 
 
 def classification_cache_key(
     provider: ProviderConfig,
     prompt: RenderedPrompt,
-    videos: list[ClassificationEvidence],
+    videos: list[Any],
 ) -> tuple[str, str, str]:
     provider_sha = provider_fingerprint(provider)
     input_sha = evidence_hash(videos)
@@ -129,9 +127,10 @@ def store_run(
     snapshot_id: int,
     provider: ProviderConfig,
     prompt: RenderedPrompt,
-    videos: list[ClassificationEvidence],
+    videos: list[Any],
     result: ClassificationRunResult,
     selection_id: int | None = None,
+    context: dict[str, Any] | None = None,
 ) -> int:
     if len(result.suggestions) != len(videos):
         raise ValueError("cannot store classification run: suggestion/video count mismatch")
@@ -150,6 +149,7 @@ def store_run(
         "max_tokens": provider.max_tokens,
         "structured_mode": provider.structured_mode,
         "extra": provider.extra,
+        "classification_context": context or {},
     }
 
     with conn:
@@ -257,6 +257,11 @@ def run_payload(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     if run is None:
         raise ValueError(f"LLM classification run {run_id} does not exist")
 
+    provider_config = json.loads(run["provider_config_json"])
+    context = provider_config.get("classification_context", {})
+    if not isinstance(context, dict):
+        context = {}
+
     batches = conn.execute(
         """
         SELECT id, batch_index, input_sha256, response_model, usage_json
@@ -295,6 +300,7 @@ def run_payload(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         "cache_key": run["cache_key"],
         "interest_profile": run["interest_profile"],
         "video_count": int(run["video_count"]),
+        "context": context,
         "batches": [
             {
                 "batch_id": int(row["id"]),

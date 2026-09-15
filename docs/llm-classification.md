@@ -9,7 +9,7 @@ catalogue decisions.
 
 Only videos without a current decision are sent to an LLM. A human decision or saved-rule
 decision therefore prevents an LLM call for that video, even if the video is present in an
-explicit saved selection.
+explicit saved selection or a previous LLM run requested more evidence.
 
 By default the latest snapshot is used. A saved selection can restrict the unresolved
 candidate set:
@@ -99,6 +99,59 @@ watchlater-llm --config watchlater.toml classify \
 Use `--no-store` for the previous ephemeral behavior: it neither checks nor writes the LLM
 cache.
 
+## Description refinement
+
+A first-pass run may return `needs_description=true`. Fetch descriptions only for that
+subset with the metadata command:
+
+```bash
+watchlater-metadata enrich --llm-needs-description --run-id 12
+```
+
+Then refine the same historical run:
+
+```bash
+watchlater-llm --config watchlater.toml refine-description \
+    --run-id 12 \
+    --provider ollama-local \
+    --dry-run
+
+watchlater-llm --config watchlater.toml refine-description \
+    --run-id 12 \
+    --provider ollama-local
+```
+
+The refinement target is the parent run's `needs_description=true` videos that are still
+unresolved **and** now have a non-empty description. Videos that gained a human/rule
+decision after the parent run are skipped. Videos still missing a description are reported
+and are not sent to the model.
+
+Each refinement evidence item contains:
+
+- the exact parent run ID;
+- the previous cheap evidence;
+- the previous validated classification;
+- the newly available description and its source;
+- whether the description was truncated.
+
+Descriptions are capped at 4000 characters by default to control prompt size. Override the
+cap when necessary:
+
+```bash
+watchlater-llm --config watchlater.toml refine-description \
+    --run-id 12 --max-description-chars 8000
+```
+
+The description stage has a distinct prompt hash. It explicitly asks the model to
+reconsider the old suggestion rather than merely repeat it, to clear `needs_description`
+when the description resolves the ambiguity, and to set `needs_transcript=true` only when
+spoken content is still materially necessary.
+
+A stored refinement is another append-only LLM run. Its `context` identifies
+`stage=description_refinement`, `parent_run_id`, and the description cap. The original run
+is retained unchanged. The normal exact-run cache, `--refresh`, and `--no-store` semantics
+also apply to refinement runs.
+
 ## Inspecting stored results
 
 Show the most recent stored run for the latest/specified snapshot, or an exact run ID:
@@ -109,8 +162,8 @@ watchlater-llm --config watchlater.toml results --snapshot 2
 watchlater-llm --config watchlater.toml results --run-id 12
 ```
 
-The output includes each historical LLM suggestion plus any **current** human/rule decision
-for the same video. The current decision is joined at read time; it does not rewrite the
-stored classification.
+The output includes run `context`, each historical LLM suggestion, and any **current**
+human/rule decision for the same video. The current decision is joined at read time; it
+does not rewrite the stored classification.
 
 Playlist creation, movement and Watch Later deletion remain separate execution stages.
