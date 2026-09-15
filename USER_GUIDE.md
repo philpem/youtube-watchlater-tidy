@@ -4,7 +4,9 @@ This is the operating guide for the **implemented** `youtube-watchlater-tidy` wo
 
 The tool is deliberately conservative: the current normal workflow analyses and plans changes locally. It does **not** yet remove videos from Watch Later or execute playlist moves on YouTube. Local `delete`, `archive` and `move` actions are plans for a later execution stage.
 
-## 1. Workflow and safety model
+## 1. Mental model and safety
+
+The workflow is a progressive funnel:
 
 ```text
 Watch Later export
@@ -12,37 +14,45 @@ Watch Later export
       v
 immutable SQLite snapshot
       |
-      +--> repair/recover missing metadata
-      +--> creator/keyword/manual cohorts + saved rules
+      +--> repair missing live metadata
+      +--> recover private/deleted metadata
+      +--> creator / title / keyword cohort triage
+      +--> reusable rules
       +--> DeArrow alternate titles
       |
       v
-LLM first pass over unresolved remainder
+LLM first pass over unresolved videos
       |
-      +--> needs_description
-      |        |
-      |        +--> selective yt-dlp metadata
-      |                 |
-      |                 +--> description refinement
-      |
-      +--> needs_transcript
-               |
-               +--> selective manual/automatic captions
-                        |
-                        +--> transcript-aware LLM refinement (planned)
-
-Human review / later execution is always authoritative.
+      +--> confident suggestion -------------------------------+
+      |                                                        |
+      +--> needs_description                                   |
+                |                                              |
+                v                                              |
+        selective yt-dlp metadata                              |
+                |                                              |
+                v                                              |
+        description-aware LLM child run                        |
+                |                                              |
+                +--> needs_transcript                           |
+                          |                                     |
+                          v                                     |
+                  selective caption acquisition                |
+                          |                                     |
+                          v                                     |
+                  transcript-aware LLM child run --------------+
+                                                               v
+                                                     human review / execution
 ```
 
-Rules to keep in mind:
+Safety rules:
 
-1. Imported snapshots are evidence; enrichment never rewrites them.
-2. Human and saved-rule decisions outrank LLM suggestions.
-3. LLM suggestions are append-only advisory evidence, not `decision_events`.
-4. Network work is selective and cached; use `--dry-run` where available.
-5. Missing descriptions/captions are not negative quality signals.
+1. **Imported snapshots are evidence.** Enrichment never rewrites imported title/channel/position data.
+2. **Human and saved-rule decisions outrank LLM suggestions.** LLM output is advisory and stored separately from `decision_events`.
+3. **Actions are local plans.** `delete`, `archive` and `move` currently do not mutate YouTube.
+4. **Network work is selective and cached.** Prefer explicit cohorts and `--dry-run`.
+5. **History is retained.** Decisions, metadata observations, archive lookups, transcript observations and LLM runs are append-only where practical.
 
-Keep backups of `watch-later.json` and `watchlater.sqlite3`.
+Keep backups of both the original `watch-later.json` and `watchlater.sqlite3`.
 
 ## 2. Install
 
@@ -52,17 +62,20 @@ python -m venv .venv
 pip install -e .
 ```
 
-Commands installed:
+Installed commands:
 
-- `watchlater` — import, reports, selections, rules, archive recovery and basic metadata repair.
+- `watchlater` — import, reports, selections, rules and archive recovery.
 - `watchlater-dearrow` — DeArrow alternate-title enrichment.
-- `watchlater-llm` — provider setup, classification/refinement and stored LLM runs.
 - `watchlater-metadata` — selective full yt-dlp metadata/description enrichment.
-- `watchlater-transcript` — selective subtitle/caption transcript acquisition.
+- `watchlater-transcript` — selective existing-caption acquisition.
+- `watchlater-llm` — provider setup, first-pass classification, description refinement and stored LLM runs.
+- `watchlater-llm-transcript` — final transcript-aware LLM refinement.
 
-All default to `watchlater.sqlite3`; put `--db PATH` before a subcommand when using another catalogue.
+Most commands default to `watchlater.sqlite3`. Put `--db PATH` before the subcommand when using another catalogue.
 
 ## 3. Export and import Watch Later
+
+Use a logged-in browser profile and a flat yt-dlp export:
 
 ```bash
 yt-dlp \
@@ -76,11 +89,13 @@ watchlater import watch-later.json
 watchlater snapshots
 ```
 
-The import is hashed/idempotent. Later exports become new snapshots. Snapshot position records the export order; do not assume it means age unless you deliberately controlled YouTube's sort order first.
+The exact export order is stored as snapshot position. Do not assume playlist position means oldest/newest unless you deliberately established that ordering in YouTube first.
 
-## 4. Repair/recover missing metadata
+The importer hashes the source file, so importing the exact same export again is idempotent. Later exports become new snapshots rather than overwriting old evidence.
 
-Inspect obvious gaps:
+## 4. Inspect and repair metadata
+
+Start with:
 
 ```bash
 watchlater creators --remaining
@@ -88,14 +103,33 @@ watchlater videos --unknown-creator --remaining
 watchlater videos --unavailable
 ```
 
-Repair live videos whose flat export lacks creator metadata:
+`--remaining` means there is no current human/rule decision.
+
+For live videos whose flat export lacks creator metadata:
 
 ```bash
 watchlater enrich --missing-creator --dry-run
 watchlater enrich --missing-creator
 ```
 
-Recover deleted/private IDs from public archives:
+Target a specific live video with:
+
+```bash
+watchlater enrich --video-id VIDEO_ID
+watchlater enrich --video-id VIDEO_ID --refresh
+```
+
+Full yt-dlp metadata is stored as a separate observation; the imported snapshot row remains unchanged.
+
+## 5. Recover private/deleted videos
+
+Watch Later can retain a video ID after the video becomes private/deleted. Recovery uses FindYouTubeVideo discovery and currently tries metadata in this order:
+
+1. Filmot data already returned by FindYouTubeVideo.
+2. PreserveTube metadata when discovery says it has a copy and Filmot yielded nothing.
+3. A specific Wayback watch-page capture discovered by FindYouTubeVideo.
+
+Run incrementally:
 
 ```bash
 watchlater recover --unavailable --limit 10
@@ -103,15 +137,7 @@ watchlater videos --unavailable --recovered
 watchlater videos --unavailable --unrecovered
 ```
 
-Recovery uses FindYouTubeVideo discovery, then Filmot, PreserveTube and Wayback metadata where available.
-
-Normal recovery skips cached IDs before `--limit`, so repeated batches advance. Refresh a specific cohort when necessary:
-
-```bash
-watchlater recover --video-id ID1 --video-id ID2 --refresh
-watchlater recover --selection 12 --refresh
-watchlater recover --unavailable --min-position 4908 --max-position 4920 --refresh
-```
+Cached results are skipped **before** `--limit`, so repeating the command advances to the next uncached batch.
 
 Inspect one cached result:
 
@@ -120,92 +146,148 @@ watchlater recovery VIDEO_ID
 watchlater recovery VIDEO_ID --raw
 ```
 
-## 5. Cheap/manual triage
+Refresh explicit targets rather than relying on broad refreshes:
 
-Do this before LLM work.
+```bash
+watchlater recover --video-id ID1 --video-id ID2 --refresh
+watchlater recover --selection 12 --refresh
+watchlater recover --unavailable --min-position 4908 --max-position 4920 --refresh
+```
+
+## 6. Cheap/manual triage first
+
+Use obvious cohorts before spending LLM calls.
+
+### Creators
 
 ```bash
 watchlater creators --remaining
-watchlater keywords --remaining --ngram 2 --min-count 3
-```
-
-Select cohorts:
-
-```bash
 watchlater select creator CHANNEL_ID --remaining
-watchlater select title --contains 'Super Mario' --remaining
-watchlater select title --regex 'conference|keynote' --remaining --max-duration 2h
 watchlater selection show
 ```
 
-Record a local plan:
+Prefer a stable channel ID over a display name.
+
+### Titles
 
 ```bash
-watchlater selection action keep
-watchlater selection action review
-watchlater selection action archive
-watchlater selection action delete --reason 'stale event/news item'
-watchlater selection action move --playlist 'Queue - Electronics'
+watchlater select title --contains 'Super Mario' --remaining
+watchlater select title --regex 'conference|keynote' --remaining --max-duration 2h
 ```
 
-These commands do not change YouTube. Undo while retaining history with:
+### Keyword/phrase discovery
+
+```bash
+watchlater keywords --remaining --ngram 1 --min-count 3
+watchlater keywords --remaining --ngram 2 --min-count 3
+watchlater keywords --remaining --ngram 3 --min-count 3
+```
+
+The default report suppresses common/function-word phrases and series boilerplate while retaining technical terms such as `C++`, `V.34` and `Z80`.
+
+### Record a local action
+
+```bash
+watchlater selection action move --playlist 'Queue - Electronics'
+watchlater selection action archive
+watchlater selection action delete --reason 'stale event/news item'
+```
+
+Actions:
+
+- `keep` — leave in Watch Later.
+- `review` — do nothing yet.
+- `archive` — worthwhile reference, eventually remove from Watch Later.
+- `delete` — discard candidate, eventually remove from Watch Later.
+- `move` — eventually add to the destination first, then remove from Watch Later.
+
+These commands only change the local catalogue.
+
+Undo while retaining history:
 
 ```bash
 watchlater selection undo
 ```
 
-Export a cohort:
+Export a cohort when useful:
 
 ```bash
 watchlater selection export --format json --output cohort.json
 watchlater selection export --format csv --output cohort.csv
 ```
 
-## 6. Reusable rules
+## 7. Reusable rules
+
+Save a useful cohort selector for future snapshots:
 
 ```bash
 watchlater select creator CHANNEL_ID --remaining
 watchlater selection save-rule \
-    'electronics creator' move \
-    --playlist 'Queue - Electronics' --priority 20
+    'electronics creator' \
+    move \
+    --playlist 'Queue - Electronics' \
+    --priority 20
+```
 
+Inspect/apply:
+
+```bash
 watchlater rules list
 watchlater rules apply --dry-run
 watchlater rules apply
 ```
 
-Rules only claim unresolved videos. Existing human decisions are never overwritten. Lower numeric priority runs first.
+Rules only act on unresolved videos. Existing human decisions are never overwritten. Lower numeric priority runs first, then rule ID order.
 
-## 7. DeArrow titles
+## 8. DeArrow alternate titles
+
+Add trusted alternate-title evidence to unresolved videos:
 
 ```bash
 watchlater-dearrow enrich --all --remaining
-watchlater-dearrow enrich --selection 12
-watchlater-dearrow show VIDEO_ID
 ```
 
-Cache/refresh examples:
+Other targets:
+
+```bash
+watchlater-dearrow enrich --selection 12
+watchlater-dearrow enrich --video-id VIDEO_ID
+```
+
+Inspect one result:
+
+```bash
+watchlater-dearrow show VIDEO_ID
+watchlater-dearrow show VIDEO_ID --raw
+```
+
+Cache controls:
 
 ```bash
 watchlater-dearrow enrich --all --max-age 7d
 watchlater-dearrow enrich --video-id VIDEO_ID --refresh
+```
+
+Privacy-preserving hash-prefix lookup:
+
+```bash
 watchlater-dearrow enrich --all --remaining --hash-prefix
 ```
 
-The imported YouTube title remains separate. Only a trusted first DeArrow submission (`locked` or non-negative votes) becomes the preferred **alternate** title; `original=true` means keep the YouTube title.
+The imported YouTube title remains separate. Only a trusted first DeArrow submission (`locked` or non-negative votes) becomes the preferred **alternate** title. `original=true` means the original YouTube title remains preferred.
 
 See [`docs/dearrow.md`](docs/dearrow.md).
 
-## 8. Configure LLM providers
+## 9. Configure an LLM provider
 
-Copy the examples:
+Copy the example files:
 
 ```bash
 cp examples/watchlater.example.toml watchlater.toml
 cp examples/interests.example.md interests.md
 ```
 
-The interest file is plain Markdown/prose. The application supplies the fixed task and output schema.
+The interest file is plain prose/Markdown describing what you find useful. The application adds its own fixed task/schema instructions.
 
 ### Ollama
 
@@ -220,7 +302,7 @@ Default endpoint: `http://127.0.0.1:11434/v1`.
 
 ### Unsloth models
 
-Serve an Unsloth-trained/exported model through an OpenAI-compatible runtime such as vLLM, llama-server or Ollama. The convenience preset defaults to vLLM:
+Serve the exported model through an OpenAI-compatible engine such as vLLM, llama-server or Ollama:
 
 ```toml
 [providers.unsloth-local]
@@ -228,6 +310,8 @@ preset = 'unsloth'
 model = 'my-org/my-unsloth-model'
 structured_mode = 'json_schema'
 ```
+
+The convenience preset defaults to `http://127.0.0.1:8000/v1`; override `base_url` if needed.
 
 ### OpenRouter
 
@@ -245,21 +329,34 @@ X-Title = 'youtube-watchlater-tidy'
 export OPENROUTER_API_KEY='...'
 ```
 
-The preset uses `https://openrouter.ai/api/v1` and `OPENROUTER_API_KEY`.
+The OpenRouter preset uses `https://openrouter.ai/api/v1` and `OPENROUTER_API_KEY` by default.
 
-Check configuration:
+### Generic OpenAI-compatible endpoint
+
+```toml
+[providers.remote]
+preset = 'generic'
+base_url = 'https://llm.example.invalid/v1'
+model = 'example-model'
+api_key_env = 'WATCHLATER_LLM_API_KEY'
+```
+
+Literal API keys/secrets in TOML are rejected.
+
+Verify configuration and the rendered prompt:
 
 ```bash
 watchlater-llm --config watchlater.toml providers
 watchlater-llm --config watchlater.toml probe --provider ollama-local
 watchlater-llm --config watchlater.toml prompt
+watchlater-llm --config watchlater.toml prompt --hash-only
 ```
 
 See [`docs/llm.md`](docs/llm.md).
 
-## 9. First-pass LLM classification
+## 10. First-pass LLM classification
 
-Inspect a small target first:
+Inspect the exact cheap evidence first:
 
 ```bash
 watchlater-llm --config watchlater.toml classify \
@@ -273,49 +370,47 @@ watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --batch-size 5
 ```
 
-The classifier only considers unresolved videos. It can suggest action, topic/type, timeliness, quality/confidence, destination, `needs_description` and `needs_transcript`.
+Use another configured provider simply by changing `--provider`.
 
-Normal classification uses an exact-run cache. Force another historical run or disable storage:
+The classifier considers unresolved videos only and returns validated suggestions including action, topic/content type, timeliness, confidence/quality, destination proposal, `needs_description`, and `needs_transcript`.
+
+Normal classification uses an exact-run cache keyed by output-affecting provider settings, prompt hash and the whole ordered evidence target. API-key values are not part of the fingerprint.
 
 ```bash
+# force another append-only run
 watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20 --refresh
+
+# provider call without reading/writing the LLM cache
 watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20 --no-store
-```
 
-Inspect runs:
-
-```bash
+# inspect stored history
 watchlater-llm --config watchlater.toml results
 watchlater-llm --config watchlater.toml results --run-id 12
 ```
 
-A later human/rule decision takes precedence without rewriting old LLM evidence.
+A later human/rule decision simply takes precedence over the historical suggestion.
 
-## 10. Description escalation
+See [`docs/llm-classification.md`](docs/llm-classification.md).
 
-For a first-pass run that requested descriptions:
+## 11. Description escalation
+
+If parent run 12 contains `needs_description=true`, fetch only those descriptions:
 
 ```bash
 watchlater-metadata enrich --llm-needs-description --run-id 12 --dry-run
 watchlater-metadata enrich --llm-needs-description --run-id 12
 ```
 
-Other selective metadata targets:
+No media is downloaded. yt-dlp metadata is stored as append-only evidence.
 
-```bash
-watchlater-metadata enrich --missing-description
-watchlater-metadata enrich --selection 12
-watchlater-metadata enrich --video-id ID1 --video-id ID2
-```
-
-No media is downloaded. Inspect evidence with:
+Inspect a result:
 
 ```bash
 watchlater-metadata show VIDEO_ID
 watchlater-metadata show VIDEO_ID --raw
 ```
 
-Refine the exact parent run after descriptions exist:
+Then reclassify exactly that parent run:
 
 ```bash
 watchlater-llm --config watchlater.toml refine-description \
@@ -325,49 +420,39 @@ watchlater-llm --config watchlater.toml refine-description \
     --run-id 12 --provider ollama-local
 ```
 
-Only the parent run's `needs_description=true` videos that remain unresolved and now have a description are sent. The new child run retains parent-run context and the old run remains unchanged.
+The child input contains the previous evidence/classification plus description and provenance. Descriptions are capped at 4000 characters by default; use `--max-description-chars` to change that.
 
-Descriptions are capped at 4000 characters by default; use `--max-description-chars` to override. The refinement should request a transcript only when spoken content is still materially necessary.
+The child result is another append-only LLM run with context containing `stage=description_refinement` and `parent_run_id=12`. The original run remains unchanged.
 
-See [`docs/rich-metadata.md`](docs/rich-metadata.md) and [`docs/llm-classification.md`](docs/llm-classification.md).
+## 12. Caption/transcript acquisition
 
-## 11. Caption/transcript acquisition
-
-If a stored first-pass or description-refinement run returns `needs_transcript=true`, fetch captions only for that subset:
+If an LLM run contains `needs_transcript=true`, fetch existing captions only for that subset:
 
 ```bash
-watchlater-transcript fetch --llm-needs-transcript --run-id CHILD_RUN_ID --dry-run
-watchlater-transcript fetch --llm-needs-transcript --run-id CHILD_RUN_ID
+watchlater-transcript fetch --llm-needs-transcript --run-id 18 --dry-run
+watchlater-transcript fetch --llm-needs-transcript --run-id 18
 ```
 
-Other explicit targets:
+The default policy is:
 
-```bash
-watchlater-transcript fetch --video-id VIDEO_ID
-watchlater-transcript fetch --selection 12
-watchlater-transcript fetch --all --limit 10
-```
+1. matching manual/normal subtitles first;
+2. matching automatic captions as fallback;
+3. otherwise cache `not_found`.
 
-Policy:
+Missing captions are **not** treated as evidence of poor video quality.
 
-1. prefer matching normal/manual subtitles;
-2. fall back to automatic captions when allowed;
-3. otherwise cache `not_found` as evidence only — absence is not a quality judgement.
-
-English is the default language. Ordered alternatives are repeatable:
+Ordered language preferences can be supplied:
 
 ```bash
 watchlater-transcript fetch --video-id VIDEO_ID \
     --language en-GB --language en --language fr
 ```
 
-Disable automatic-caption fallback with `--no-auto`.
+Disable automatic captions with `--no-auto`.
 
-The transcript cache key includes language preferences and automatic-caption policy. Successful and `not_found` lookups are skipped for the same policy unless `--refresh` is used.
+No video/audio is downloaded. The cache retains normalized transcript text, segments/timestamps, source type, language, format, raw caption payload, fetch time and request-policy hash.
 
-The selected caption is fetched from yt-dlp's subtitle metadata, preferring JSON3 and falling back to WebVTT. Video/audio media is never downloaded by this command. Normalized text, segment/timestamp evidence, source/language and the raw caption payload are retained.
-
-Inspect a transcript:
+Inspect cached evidence:
 
 ```bash
 watchlater-transcript show VIDEO_ID
@@ -376,74 +461,121 @@ watchlater-transcript show VIDEO_ID --raw
 
 See [`docs/transcripts.md`](docs/transcripts.md).
 
-**Transcript-aware LLM refinement is not implemented yet.** Caption acquisition is the evidence stage for that next step.
+## 13. Transcript-aware LLM refinement
 
-## 12. Recommended run
+After captions have been cached for parent run 18, inspect the final refinement evidence:
 
 ```bash
-# Export/import
+watchlater-llm-transcript \
+    --config watchlater.toml \
+    --run-id 18 \
+    --provider ollama-local \
+    --dry-run
+```
+
+Then run it:
+
+```bash
+watchlater-llm-transcript \
+    --config watchlater.toml \
+    --run-id 18 \
+    --provider ollama-local
+```
+
+Only parent-run rows that both have `needs_transcript=true` and remain unresolved are eligible. Videos with no successful cached transcript are reported and skipped; the prior classification remains intact.
+
+The model receives previous evidence, previous validated classification, transcript text and transcript provenance. Manual/automatic source type is explicit so automatic-caption errors can be considered.
+
+Long transcripts default to a 12,000-character context budget. Instead of taking only the front, the tool samples the **beginning, middle and end** deterministically:
+
+```bash
+watchlater-llm-transcript \
+    --config watchlater.toml \
+    --run-id 18 \
+    --max-transcript-chars 24000
+```
+
+The original cached transcript is never truncated. Changing the character budget changes the evidence hash/cache key.
+
+The result is another append-only LLM child run with context containing `stage=transcript_refinement`, `parent_run_id` and the transcript budget. Human/rule decisions continue to outrank it.
+
+Cache controls mirror the other LLM stages:
+
+```bash
+watchlater-llm-transcript --config watchlater.toml --run-id 18 --refresh
+watchlater-llm-transcript --config watchlater.toml --run-id 18 --no-store
+```
+
+See [`docs/transcripts.md`](docs/transcripts.md) and [`docs/llm-classification.md`](docs/llm-classification.md).
+
+## 14. Recommended end-to-end run
+
+```bash
+# export/import
 yt-dlp --cookies-from-browser firefox --flat-playlist --dump-single-json \
     'https://www.youtube.com/playlist?list=WL' > watch-later.json
 watchlater import watch-later.json
 
-# Repair/recover metadata gaps
+# repair/recover metadata gaps
 watchlater enrich --missing-creator
 watchlater recover --unavailable --limit 20
 
-# Cheap triage
+# cheap triage
 watchlater creators --remaining
 watchlater keywords --remaining --ngram 2 --min-count 3
-# ... select/action/save rules ...
+# ... select obvious cohorts, inspect, action them, save useful rules ...
 
-# Cheap semantic title evidence
+# alternate-title evidence
 watchlater-dearrow enrich --all --remaining
 
-# First LLM pass
+# first-pass LLM
 watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --dry-run
 watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --batch-size 5
 
-# Suppose the first pass was run 12
+# suppose the stored first-pass run is 12
 watchlater-metadata enrich --llm-needs-description --run-id 12
 watchlater-llm --config watchlater.toml refine-description \
     --run-id 12 --provider ollama-local
 
-# Suppose the description child run was 18 and still requests transcripts
+# suppose the description-refinement child run is 18
 watchlater-transcript fetch --llm-needs-transcript --run-id 18
+watchlater-llm-transcript --config watchlater.toml \
+    --run-id 18 --provider ollama-local
 
-# Inspect stored evidence/results; human decisions remain authoritative
-watchlater-llm --config watchlater.toml results --run-id 18
+# inspect the newest child run and continue human decisions
+watchlater-llm --config watchlater.toml results
 watchlater creators --remaining
 ```
 
-## 13. Cache/refresh summary
+## 15. Cache/refresh cheat sheet
 
-- `watchlater recover` — normal batches skip cached IDs before `--limit`.
-- `watchlater-dearrow` — cached found/not-found; TTL via `--max-age` or explicit `--refresh`.
-- `watchlater-metadata` — successful yt-dlp observations cached; `--refresh` refetches target.
-- `watchlater-transcript` — cache identity includes language/automatic policy; found/not-found cached.
-- `watchlater-llm classify` / `refine-description` — exact provider+prompt+evidence runs cached; `--refresh` appends a new run and `--no-store` bypasses persistence.
+`--refresh` means “perform a new network/provider operation despite a cache”, after selecting the target.
 
-Use `--dry-run` before large network/provider operations where available.
+- `watchlater recover` — cache keyed by archive lookup/video.
+- `watchlater-dearrow` — cache found/not-found; `--max-age` supplies TTL behavior.
+- `watchlater-metadata` — cache successful yt-dlp metadata observations.
+- `watchlater-transcript` — cache keyed by video plus language/automatic-caption policy.
+- `watchlater-llm classify` / `refine-description` / `watchlater-llm-transcript` — exact provider + prompt + evidence cache; `--refresh` stores another historical run; `--no-store` bypasses persistence.
 
-## 14. Current limitations
+When available, use `--dry-run` before a large network/provider operation.
 
-- Local `move`, `archive` and `delete` decisions do not yet change YouTube.
-- Playlist synchronization/execution is not implemented yet.
-- Caption/transcript acquisition is implemented, but transcript-aware LLM refinement is not yet implemented.
-- Audio transcription is deliberately not used as an automatic fallback.
-- The local HTML human-review report is not implemented yet.
+## 16. Current limitations
 
-The destructive "clear all Watch Later" browser-console snippet in the main README is separate from this selective workflow. Keep an export/backup first.
+- **Selective YouTube execution is not yet implemented.** Local `move`, `archive` and `delete` decisions do not change YouTube.
+- **Playlist synchronization/execution is not yet implemented.** A `move` destination is a plan only.
+- **The local HTML/human-review report is not yet implemented.** Use CLI reports, exports and stored LLM results meanwhile.
+- Transcript escalation uses existing captions only. It deliberately does **not** download/transcribe audio by default.
 
-## 15. Detailed documentation
+The destructive “clear all Watch Later” browser-console snippet in the main README is separate from this selective workflow and should only be used after keeping an export/backup.
 
-- [`docs/README.md`](docs/README.md) — documentation index.
-- [`docs/dearrow.md`](docs/dearrow.md) — DeArrow evidence and trust rules.
-- [`docs/llm.md`](docs/llm.md) — providers, prompt profiles and OpenAI-compatible transport.
-- [`docs/llm-classification.md`](docs/llm-classification.md) — classification/refinement validation, persistence and cache behavior.
-- [`docs/rich-metadata.md`](docs/rich-metadata.md) — selective full yt-dlp metadata/description enrichment.
-- [`docs/transcripts.md`](docs/transcripts.md) — caption source policy, language selection and transcript cache.
+## 17. Detailed documentation
+
+- [`docs/dearrow.md`](docs/dearrow.md) — DeArrow API, trust rules, privacy and attribution.
+- [`docs/llm.md`](docs/llm.md) — provider configuration, interest profiles and OpenAI-compatible transport.
+- [`docs/llm-classification.md`](docs/llm-classification.md) — evidence, validation, append-only LLM history and exact-run caching.
+- [`docs/rich-metadata.md`](docs/rich-metadata.md) — selective yt-dlp metadata/description enrichment.
+- [`docs/transcripts.md`](docs/transcripts.md) — caption acquisition and transcript-aware refinement.
 
 Use `COMMAND --help` as the definitive option reference for the installed version.

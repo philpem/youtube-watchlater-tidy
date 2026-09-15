@@ -20,6 +20,7 @@ watchlater-dearrow = "youtube_watchlater_tidy.dearrow_cli:main"
 watchlater-llm = "youtube_watchlater_tidy.llm_cli:main"
 watchlater-metadata = "youtube_watchlater_tidy.metadata_cli:main"
 watchlater-transcript = "youtube_watchlater_tidy.transcript_cli:main"
+watchlater-llm-transcript = "youtube_watchlater_tidy.llm_transcript_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
