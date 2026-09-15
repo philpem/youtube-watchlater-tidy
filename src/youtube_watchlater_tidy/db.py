@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -172,6 +172,34 @@ CREATE TABLE IF NOT EXISTS saved_rules (
 
 CREATE INDEX IF NOT EXISTS idx_saved_rules_enabled_priority
     ON saved_rules(enabled, priority, id);
+
+CREATE TABLE IF NOT EXISTS dearrow_lookups (
+    id INTEGER PRIMARY KEY,
+    video_id TEXT NOT NULL REFERENCES videos(video_id) ON DELETE CASCADE,
+    looked_up_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('found', 'not_found', 'error')),
+    preferred_title TEXT,
+    titles_json TEXT NOT NULL,
+    source_url TEXT,
+    raw_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dearrow_lookups_video
+    ON dearrow_lookups(video_id, id);
+
+CREATE VIEW IF NOT EXISTS preferred_dearrow AS
+SELECT d.*
+FROM dearrow_lookups AS d
+WHERE d.status = 'found'
+  AND d.preferred_title IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM dearrow_lookups AS newer
+      WHERE newer.video_id = d.video_id
+        AND newer.status = 'found'
+        AND newer.preferred_title IS NOT NULL
+        AND newer.id > d.id
+  );
 """
 
 MIGRATION_1_TO_2 = """
@@ -298,6 +326,36 @@ CREATE INDEX IF NOT EXISTS idx_saved_rules_enabled_priority
     ON saved_rules(enabled, priority, id);
 """
 
+MIGRATION_5_TO_6 = """
+CREATE TABLE IF NOT EXISTS dearrow_lookups (
+    id INTEGER PRIMARY KEY,
+    video_id TEXT NOT NULL REFERENCES videos(video_id) ON DELETE CASCADE,
+    looked_up_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('found', 'not_found', 'error')),
+    preferred_title TEXT,
+    titles_json TEXT NOT NULL,
+    source_url TEXT,
+    raw_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dearrow_lookups_video
+    ON dearrow_lookups(video_id, id);
+
+CREATE VIEW IF NOT EXISTS preferred_dearrow AS
+SELECT d.*
+FROM dearrow_lookups AS d
+WHERE d.status = 'found'
+  AND d.preferred_title IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM dearrow_lookups AS newer
+      WHERE newer.video_id = d.video_id
+        AND newer.status = 'found'
+        AND newer.preferred_title IS NOT NULL
+        AND newer.id > d.id
+  );
+"""
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
@@ -340,7 +398,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_2_TO_3)
             conn.executescript(MIGRATION_3_TO_4)
             conn.executescript(MIGRATION_4_TO_5)
-            conn.execute("PRAGMA user_version = 5")
+            conn.executescript(MIGRATION_5_TO_6)
+            conn.execute("PRAGMA user_version = 6")
         return
 
     if version == 2:
@@ -348,20 +407,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_2_TO_3)
             conn.executescript(MIGRATION_3_TO_4)
             conn.executescript(MIGRATION_4_TO_5)
-            conn.execute("PRAGMA user_version = 5")
+            conn.executescript(MIGRATION_5_TO_6)
+            conn.execute("PRAGMA user_version = 6")
         return
 
     if version == 3:
         with conn:
             conn.executescript(MIGRATION_3_TO_4)
             conn.executescript(MIGRATION_4_TO_5)
-            conn.execute("PRAGMA user_version = 5")
+            conn.executescript(MIGRATION_5_TO_6)
+            conn.execute("PRAGMA user_version = 6")
         return
 
     if version == 4:
         with conn:
             conn.executescript(MIGRATION_4_TO_5)
-            conn.execute("PRAGMA user_version = 5")
+            conn.executescript(MIGRATION_5_TO_6)
+            conn.execute("PRAGMA user_version = 6")
+        return
+
+    if version == 5:
+        with conn:
+            conn.executescript(MIGRATION_5_TO_6)
+            conn.execute("PRAGMA user_version = 6")
         return
 
     if version != SCHEMA_VERSION:

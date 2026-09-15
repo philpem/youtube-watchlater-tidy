@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from youtube_watchlater_tidy.db import ensure_schema, open_catalogue
+from youtube_watchlater_tidy.db import SCHEMA_VERSION, ensure_schema, open_catalogue
 from youtube_watchlater_tidy.importer import import_watchlater_json
 from youtube_watchlater_tidy.rules import (
     apply_enabled_rules,
@@ -157,7 +157,7 @@ class SavedRuleTests(unittest.TestCase):
             results = apply_enabled_rules(conn, self.second_snapshot)
         self.assertEqual(results, [])
 
-    def test_schema_v4_migrates_to_v5(self) -> None:
+    def test_schema_v4_migrates_to_current_version(self) -> None:
         path = self.root / "v4.sqlite3"
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
@@ -169,8 +169,9 @@ class SavedRuleTests(unittest.TestCase):
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         conn.close()
-        self.assertEqual(version, 5)
+        self.assertEqual(version, SCHEMA_VERSION)
         self.assertIn("saved_rules", tables)
+        self.assertIn("dearrow_lookups", tables)
 
 
 if __name__ == "__main__":
