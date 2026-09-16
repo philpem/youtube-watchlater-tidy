@@ -17,23 +17,53 @@ from .playlist_sync import (
     load_inventory_file,
     plan_payload,
 )
+from .youtube_api import (
+    DEFAULT_CLIENT_SECRETS,
+    DEFAULT_TOKEN_FILE,
+    authenticated_client,
+    execute_api_plan,
+    refresh_inventory,
+)
 
 DEFAULT_DB = Path("watchlater.sqlite3")
+
+
+def _add_oauth_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--client-secrets",
+        type=Path,
+        default=DEFAULT_CLIENT_SECRETS,
+        help=f"Google OAuth desktop-client JSON (default: {DEFAULT_CLIENT_SECRETS})",
+    )
+    parser.add_argument(
+        "--token",
+        type=Path,
+        default=DEFAULT_TOKEN_FILE,
+        help=f"OAuth token cache (default: {DEFAULT_TOKEN_FILE})",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="watchlater-playlist",
-        description="Plan and inspect idempotent YouTube destination-playlist synchronization.",
+        description="Plan and execute idempotent YouTube destination-playlist synchronization.",
     )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     sub = parser.add_subparsers(dest="command", required=True)
 
     inventory = sub.add_parser("inventory", help="manage the local destination-playlist inventory")
     inventory_sub = inventory.add_subparsers(dest="inventory_command", required=True)
-    inventory_import = inventory_sub.add_parser("import", help="replace the local inventory from versioned JSON")
+    inventory_import = inventory_sub.add_parser(
+        "import", help="replace the local inventory from versioned JSON"
+    )
     inventory_import.add_argument("file", type=Path)
     inventory_sub.add_parser("show", help="show the currently imported inventory as JSON")
+    inventory_refresh = inventory_sub.add_parser(
+        "refresh",
+        help="refresh owned playlists/membership from the authenticated YouTube Data API",
+    )
+    _add_oauth_args(inventory_refresh)
+    inventory_refresh.add_argument("--no-progress", action="store_true")
 
     plan = sub.add_parser(
         "plan",
@@ -59,10 +89,46 @@ def _parser() -> argparse.ArgumentParser:
     show = sub.add_parser("show", help="show the latest or selected stored playlist sync plan")
     show.add_argument("--run-id", type=int)
     show.add_argument("--snapshot", type=int)
+
+    execute = sub.add_parser(
+        "execute",
+        help="inspect or apply one persisted API playlist plan (dry-run unless --apply)",
+    )
+    execute.add_argument("--run-id", type=int, help="plan id (default: latest plan)")
+    execute.add_argument("--snapshot", type=int, help="snapshot for latest-plan lookup")
+    execute.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform authenticated YouTube playlist creates/inserts; omitted means no network writes",
+    )
+    execute.add_argument(
+        "--allow-over-quota",
+        action="store_true",
+        help="permit --apply even when the persisted plan estimate exceeds its quota limit",
+    )
+    execute.add_argument(
+        "--max-writes",
+        type=int,
+        help="maximum playlist creates + item inserts this invocation; live duplicate checks do not count",
+    )
+    _add_oauth_args(execute)
     return parser
 
 
 def _cmd_inventory(args: argparse.Namespace) -> int:
+    if args.inventory_command == "refresh":
+        client = authenticated_client(
+            client_secrets=args.client_secrets,
+            token_file=args.token,
+        )
+        with open_catalogue(args.db) as conn:
+            result = refresh_inventory(conn, client, show_progress=not args.no_progress)
+        print(
+            f"Refreshed {result.playlists} playlist(s) / {result.items} item(s) "
+            f"from {result.source}; inventory fetched_at={result.fetched_at}"
+        )
+        return 0
+
     with open_catalogue(args.db) as conn:
         if args.inventory_command == "import":
             payload = load_inventory_file(args.file)
@@ -93,7 +159,10 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     if args.output:
-        args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        args.output.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         print(f"Wrote plan {result.run_id} to {args.output}", file=sys.stderr)
 
     if result.exceeds_quota and args.backend == "api" and not args.allow_over_quota:
@@ -115,6 +184,51 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_execute(args: argparse.Namespace) -> int:
+    client = None
+    if args.apply:
+        client = authenticated_client(
+            client_secrets=args.client_secrets,
+            token_file=args.token,
+        )
+
+    with open_catalogue(args.db) as conn:
+        run_id = args.run_id if args.run_id is not None else latest_plan_id(conn, args.snapshot)
+        result = execute_api_plan(
+            conn,
+            run_id,
+            client=client,
+            apply=args.apply,
+            allow_over_quota=args.allow_over_quota,
+            max_writes=args.max_writes,
+        )
+        payload = plan_payload(conn, run_id)
+
+    output = {
+        "execution": {
+            "run_id": result.run_id,
+            "applied": result.applied,
+            "created_playlists": result.created_playlists,
+            "inserted": result.inserted,
+            "already_present_this_run": result.already_present,
+            "failed_this_run": result.failed,
+            "stale_this_run": result.stale,
+            "remaining": result.remaining,
+            "writes_this_run": result.writes,
+            "run_status": result.run_status,
+        },
+        "plan": payload,
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    if not args.apply:
+        print(
+            "Dry run only. Re-run with --apply to authorize and perform playlist writes.",
+            file=sys.stderr,
+        )
+        return 0
+    return 0 if result.failed == 0 and result.stale == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -125,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_plan(args)
         if args.command == "show":
             return _cmd_show(args)
+        if args.command == "execute":
+            return _cmd_execute(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"watchlater-playlist: error: {exc}", file=sys.stderr)
         return 2
