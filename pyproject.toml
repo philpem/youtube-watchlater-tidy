@@ -14,6 +14,13 @@ dependencies = [
     "tqdm>=4.66",
 ]
 
+[project.optional-dependencies]
+youtube-api = [
+    "google-api-python-client>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "google-auth-httplib2>=0.2",
+]
+
 [project.scripts]
 watchlater = "youtube_watchlater_tidy.cli:main"
 watchlater-dearrow = "youtube_watchlater_tidy.dearrow_cli:main"

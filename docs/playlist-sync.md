@@ -1,123 +1,128 @@
 # Destination playlist synchronization
 
-Issue #10 separates **classification/planning** from the mechanism that eventually changes YouTube. The current implementation provides the execution-neutral planning and checkpoint foundation; API/OAuth and browser writers are later stages.
+Playlist synchronization deliberately separates **classification**, **planning**, and **execution**. A stored LLM suggestion is never executable merely because a model proposed `move`; only a current local `move` decision is allowed into a plan.
 
-No command described here currently changes YouTube.
+The current implementation supports:
 
-## Why an inventory is required
+1. destination-playlist inventory from versioned JSON or the authenticated YouTube Data API;
+2. persistent/idempotent move planning;
+3. quota and stale-decision checks;
+4. authenticated YouTube Data API execution for normal playlists;
+5. resumable per-playlist/per-video checkpoints.
 
-A destination title that is absent from local knowledge must not automatically be interpreted as “create a new playlist”. Before planning, import a snapshot of the user's normal YouTube playlists and (where known) their current video membership.
+Watch Later removal is still separate work under issue #7. A successful destination insertion does **not** itself remove the source item from Watch Later.
 
-The current versioned inventory format is:
+## Install API support
 
-```text
-youtube-watchlater-tidy-playlist-inventory-v1
-```
-
-An example is provided as [`examples/playlist-inventory.example.json`](../examples/playlist-inventory.example.json).
-
-Import it with:
+The normal package stays lightweight. Install Google API/OAuth support explicitly:
 
 ```bash
-watchlater-playlist inventory import playlist-inventory.json
+pip install -e '.[youtube-api]'
 ```
 
-Inspect the cached inventory:
+This adds Google's maintained Python client/auth packages (`google-api-python-client`, `google-auth-oauthlib`, and `google-auth-httplib2`).
+
+## OAuth setup
+
+Create an OAuth **Desktop app** client in a Google Cloud project with the YouTube Data API enabled, then download the client-secret JSON.
+
+The CLI defaults to:
+
+```text
+client_secret.json
+.youtube-watchlater-token.json
+```
+
+Both default names are ignored by Git. The token cache is written mode `0600` where the platform permits it.
+
+On first authenticated use, the installed-app OAuth flow opens a local browser authorization page. Later runs reuse/refresh the token cache.
+
+Override either path when needed:
+
+```bash
+watchlater-playlist inventory refresh \
+    --client-secrets ~/private/youtube-client.json \
+    --token ~/private/youtube-token.json
+```
+
+The requested OAuth scope is `https://www.googleapis.com/auth/youtube.force-ssl`, which is sufficient for normal playlist reads/writes used here.
+
+## Refresh the live playlist inventory
+
+Before planning, refresh owned normal playlists and their known membership:
+
+```bash
+watchlater-playlist inventory refresh
+```
+
+The command lists owned playlists and then their items, showing a progress bar. Disable it with `--no-progress`.
+
+Inspect the local cache:
 
 ```bash
 watchlater-playlist inventory show
 ```
 
-Import replaces the previous inventory atomically. Duplicate playlist IDs and duplicate video IDs inside one playlist are rejected. Duplicate **titles** are retained because YouTube allows them; planning refuses to resolve an ambiguous destination title until the inventory/user disambiguates it.
+The same versioned inventory can still be imported manually:
 
-Later API/browser inventory refreshers can populate the same tables without changing the planner.
+```bash
+watchlater-playlist inventory import playlist-inventory.json
+```
 
-## What becomes an executable playlist plan
+The format remains:
 
-Only current local catalogue decisions with:
+```text
+youtube-watchlater-tidy-playlist-inventory-v1
+```
+
+See [`examples/playlist-inventory.example.json`](../examples/playlist-inventory.example.json).
+
+Duplicate playlist IDs and duplicate video IDs inside one playlist are rejected. Duplicate **titles** are retained because YouTube permits them; planning refuses an ambiguous title rather than guessing.
+
+## Build a move plan
+
+Only current catalogue decisions where:
 
 ```text
 action = move
 ```
 
-are included. Stored LLM `move` suggestions are **not** executable input merely because the model proposed them. They need to become a current reviewed/rule/human decision first.
+are included. LLM `move` proposals remain advisory until a human/rule workflow turns them into a current decision.
 
-Create a plan with:
-
-```bash
-watchlater-playlist plan
-```
-
-or select the future executor explicitly:
+Create a plan:
 
 ```bash
 watchlater-playlist plan --backend api
-watchlater-playlist plan --backend browser
 ```
 
-Planning is a dry-run with respect to YouTube. It persists the exact plan and checkpoints in SQLite so a later executor can resume/audit it.
+For every destination:
 
-## Destination resolution
-
-For every distinct destination name in the current `move` decisions:
-
-- exactly one inventory title match -> `existing`, with a stable playlist ID;
+- exactly one inventory title match -> stable existing playlist ID;
 - no match -> `create_planned`;
-- more than one match -> planning fails as ambiguous.
+- more than one title match -> planning fails as ambiguous.
 
-New destinations default to `private`:
+New destinations default to private; choose another privacy explicitly if required:
 
 ```bash
-watchlater-playlist plan --new-playlist-privacy private
+watchlater-playlist plan --backend api --new-playlist-privacy unlisted
 ```
 
-`unlisted` and `public` can be selected explicitly.
-
-## Existing membership and idempotence
-
-If the inventory says a video is already present in its resolved destination, the item is stored as:
-
-```text
-already_present
-```
-
-and no insertion is included in the API quota estimate.
-
-Other items begin as `planned`. Future executors update these persistent rows to inserted/failed/skipped rather than deriving state from playlist order.
-
-## Decision-event checkpointing and stale plans
-
-Every planned video stores the exact `decision_events.id` that authorized the move. `watchlater-playlist show` compares that ID and destination with the **current** catalogue decision.
-
-If the user changes a decision after planning, the old item becomes:
-
-```json
-"stale": true
-```
-
-A future executor must refuse stale items instead of replaying an obsolete plan.
-
-Inspect the latest plan:
+The plan stores the exact `decision_events.id` that authorized every move. If the decision changes later, `watchlater-playlist show` marks that item stale.
 
 ```bash
 watchlater-playlist show
-```
-
-or a particular plan:
-
-```bash
 watchlater-playlist show --run-id 4
 ```
 
-## API quota estimate
+## API quota planning
 
-As of September 2026, Google's YouTube Data API documentation lists:
+The planner defaults currently reflect Google's documented write costs:
 
 - `playlists.insert`: 50 units;
 - `playlistItems.insert`: 50 units;
-- list calls: normally 1 unit.
+- default combined allowance used by this tool: 10,000 units.
 
-The planner defaults to 50 units per planned playlist creation/insertion and a 10,000-unit allowance, but all three values are configurable because API quotas can change:
+These are configurable planner inputs, not schema invariants:
 
 ```bash
 watchlater-playlist plan \
@@ -127,47 +132,101 @@ watchlater-playlist plan \
     --playlist-insert-cost 50
 ```
 
-For an API plan:
+The estimate is:
 
 ```text
-estimated quota = new playlist creations × create cost
-                + missing video insertions × insert cost
+new destination playlists × create cost
++ missing destination memberships × insert cost
 ```
 
-An item already present costs zero insertion units in the plan. A browser-backend plan reports zero **API** quota because it will not use those API writes.
+A plan exceeding its configured allowance is still persisted for inspection but exits non-zero unless `--allow-over-quota` is supplied. Execution independently refuses an over-quota plan unless explicitly overridden again.
 
-If an API estimate exceeds `--quota-limit`, the plan is still stored/printed for inspection but the CLI exits non-zero unless `--allow-over-quota` is given. This is a planning warning only; there is still no external execution in this tranche.
+## Dry-run execution is the default
 
-The current quota references are:
+Inspect what would execute without OAuth/network writes:
+
+```bash
+watchlater-playlist execute --run-id 4
+```
+
+No authenticated client is created unless `--apply` is present.
+
+The executor refuses an API plan before writes when:
+
+- any planned item is stale relative to its authorizing decision event;
+- the stored plan exceeds its configured quota allowance and `--allow-over-quota` is absent;
+- the run was planned for the browser backend rather than API.
+
+## Apply an API plan
+
+After reviewing the stored plan:
+
+```bash
+watchlater-playlist execute --run-id 4 --apply
+```
+
+Use non-default OAuth files if needed:
+
+```bash
+watchlater-playlist execute --run-id 4 --apply \
+    --client-secrets ~/private/youtube-client.json \
+    --token ~/private/youtube-token.json
+```
+
+### Live safety checks
+
+At execution time the API backend:
+
+1. lists owned playlists again;
+2. uses a planned stable playlist ID when one already existed;
+3. for a `create_planned` destination, resolves the title against the **live** account before creating anything;
+4. refuses ambiguous live titles;
+5. refuses to silently recreate a previously known destination ID that has disappeared;
+6. re-checks the current decision-event identity before the live membership/write step;
+7. checks live destination membership immediately before every planned insertion;
+8. treats an already-present video as success rather than inserting a duplicate;
+9. checkpoints successful creation/insertion or failure in SQLite.
+
+A newly created destination is also written into the local playlist inventory. Successful/already-present item evidence is cached there as well, making later planning useful even before another full inventory refresh.
+
+## Limit writes per invocation
+
+For conservative rollout or testing:
+
+```bash
+watchlater-playlist execute --run-id 4 --apply --max-writes 5
+```
+
+`--max-writes` counts actual destination-playlist creations plus item insertions. Read-only live checks do not count. Hitting the cap leaves the run `partial`; repeat the command to resume from persistent checkpoints.
+
+## Resume and idempotence
+
+The executor works from `playlist_sync_destinations` and `playlist_sync_items`, not playlist order. Successful insertions are not repeated on resume. Failed items remain retryable. A live duplicate found before insertion is checkpointed as `already_present`.
+
+Example:
+
+```bash
+watchlater-playlist execute --run-id 4 --apply --max-writes 2
+watchlater-playlist show --run-id 4
+watchlater-playlist execute --run-id 4 --apply
+```
+
+If a current move decision changes between invocations, create a new plan rather than trying to force the stale one.
+
+## Inventory JSON remains useful
+
+Manual/offline inventories remain supported for testing, auditing, and the future browser executor. The planner and checkpoint tables are execution-neutral; an API plan and browser plan represent the same local move intent even though their write mechanisms differ.
+
+## What remains for issue #10
+
+The official API backend now handles normal playlist creation/insertion. Remaining issue #10 work is primarily:
+
+1. authenticated browser executor for quota-heavy bulk playlist work;
+2. tighter coordination with issue #7 so Watch Later removal occurs only after a `move` destination is confirmed `inserted` or `already_present`;
+3. any future support for one video intentionally targeting multiple playlists.
+
+Current quota references:
 
 - <https://developers.google.com/youtube/v3/docs/playlists/insert>
 - <https://developers.google.com/youtube/v3/docs/playlistItems/insert>
 - <https://developers.google.com/youtube/v3/determine_quota_cost>
-
-## Exporting the exact plan
-
-The planner always prints JSON. It can also write the exact stored representation to a file:
-
-```bash
-watchlater-playlist plan --output playlist-plan.json
-```
-
-The stored plan includes:
-
-- snapshot ID;
-- executor backend;
-- inventory timestamp;
-- destination resolution/create status;
-- every exact video ID and authorizing decision-event ID;
-- existing playlist/item IDs where known;
-- insertion/already-present state;
-- quota assumptions and estimate.
-
-## What remains for issue #10
-
-This foundation intentionally performs no OAuth or browser mutation yet. Subsequent tranches add:
-
-1. API/OAuth inventory refresh and executor;
-2. idempotent normal-playlist create/insert using these checkpoint tables;
-3. browser executor for quota-heavy bulk work;
-4. coordination with #7 so Watch Later removal occurs only after a `move` destination is confirmed inserted/already-present.

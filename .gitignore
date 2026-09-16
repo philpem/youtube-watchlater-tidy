@@ -5,6 +5,10 @@ watchlater*.json
 *.sqlite3
 *.db
 
+# OAuth credentials/token caches must never be committed.
+client_secret*.json
+.youtube-watchlater-token.json
+
 # Generated reports / exports.
 review-output/
 reports/
