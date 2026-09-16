@@ -30,6 +30,7 @@ watchlater-transcript = "youtube_watchlater_tidy.transcript_cli:main"
 watchlater-llm-transcript = "youtube_watchlater_tidy.llm_transcript_cli:main"
 watchlater-review = "youtube_watchlater_tidy.review_cli:main"
 watchlater-playlist = "youtube_watchlater_tidy.playlist_sync_cli:main"
+watchlater-remove = "youtube_watchlater_tidy.watchlater_remove_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
