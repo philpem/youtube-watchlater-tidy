@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .playlist_sync import ensure_playlist_sync_schema
 from .reports import latest_snapshot_id
 
 REMOVAL_ACTIONS = {"delete", "archive", "move"}
@@ -61,6 +62,9 @@ def _utc_now() -> str:
 
 
 def ensure_watchlater_removal_schema(conn: sqlite3.Connection) -> None:
+    # The removal table has an optional FK into playlist_sync_runs for confirmed moves.
+    # Initialize that referenced schema even for delete/archive-only catalogues.
+    ensure_playlist_sync_schema(conn)
     with conn:
         conn.executescript(WATCHLATER_REMOVAL_SCHEMA_SQL)
 
@@ -78,28 +82,23 @@ def _confirmed_move_checkpoint(
     have revalidated it live, represented by attempted_at being non-null.
     """
 
-    try:
-        row = conn.execute(
-            """
-            SELECT i.run_id
-            FROM playlist_sync_items AS i
-            JOIN playlist_sync_runs AS r ON r.id = i.run_id
-            WHERE i.decision_event_id = ?
-              AND i.video_id = ?
-              AND i.destination_name = ?
-              AND (
-                    i.status = 'inserted'
-                    OR (i.status = 'already_present' AND i.attempted_at IS NOT NULL)
-              )
-            ORDER BY i.run_id DESC
-            LIMIT 1
-            """,
-            (decision_event_id, video_id, destination_playlist),
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc):
-            return None
-        raise
+    row = conn.execute(
+        """
+        SELECT i.run_id
+        FROM playlist_sync_items AS i
+        JOIN playlist_sync_runs AS r ON r.id = i.run_id
+        WHERE i.decision_event_id = ?
+          AND i.video_id = ?
+          AND i.destination_name = ?
+          AND (
+                i.status = 'inserted'
+                OR (i.status = 'already_present' AND i.attempted_at IS NOT NULL)
+          )
+        ORDER BY i.run_id DESC
+        LIMIT 1
+        """,
+        (decision_event_id, video_id, destination_playlist),
+    ).fetchone()
     return None if row is None else int(row["run_id"])
 
 

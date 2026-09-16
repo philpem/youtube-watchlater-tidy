@@ -9,6 +9,9 @@ watchlater*.json
 client_secret*.json
 .youtube-watchlater-token.json
 
+# Playwright profile contains authenticated browser state/cookies.
+.watchlater-playwright-profile/
+
 # Generated reports / exports.
 review-output/
 reports/

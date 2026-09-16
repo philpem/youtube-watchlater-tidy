@@ -1,8 +1,11 @@
 # youtube-watchlater-tidy user guide
 
-This is the operating guide for the **implemented** workflow. Detailed reference notes live in [`docs/`](docs/).
+This is the operating guide for the implemented workflow. Detailed references live in
+[`docs/`](docs/).
 
-The project is deliberately conservative: imported Watch Later snapshots are evidence; human/rule decisions outrank LLM suggestions; and YouTube-writing commands require an explicit execution step. Keep backups of both `watch-later.json` and `watchlater.sqlite3`.
+The project is deliberately conservative: imported Watch Later snapshots are evidence,
+human/rule decisions outrank LLM suggestions, and YouTube-writing commands require explicit
+execution flags. Keep backups of both `watch-later.json` and `watchlater.sqlite3`.
 
 ## 1. Workflow at a glance
 
@@ -12,18 +15,15 @@ Watch Later export
       v
 immutable SQLite snapshot
       |
-      +--> repair missing live metadata
-      +--> recover private/deleted metadata
-      +--> creator/title/keyword cohort triage
-      +--> reusable rules
+      +--> metadata repair / archive recovery
+      +--> creator/title/keyword triage + saved rules
       +--> DeArrow alternate titles
       |
       v
 LLM first pass over unresolved videos
       |
-      +--> needs_description -> selective metadata -> description refinement
-      |
-      +--> needs_transcript  -> selective captions -> transcript refinement
+      +--> descriptions -> description refinement
+      +--> captions     -> transcript refinement
       |
       v
 self-contained HTML human review
@@ -31,19 +31,26 @@ self-contained HTML human review
       v
 current reviewed/rule decisions
       |
-      +--> move -> destination playlist plan -> optional YouTube Data API execution
-      |
-      +--> delete/archive -> Watch Later removal is still a separate future executor
+      +--> move ----------> destination playlist plan/API execution --+
+      |                                                              |
+      +--> delete/archive --------------------------------------------+
+                                                                     |
+                                                                     v
+                                                        Watch Later removal plan
+                                                                     |
+                                                                     v
+                                                  explicit Playwright execution
 ```
 
 Important invariants:
 
 1. Enrichment never rewrites imported snapshot fields.
-2. LLM suggestions are advisory evidence, never automatic `decision_events`.
-3. Playlist execution only consumes **current local `move` decisions**, not raw LLM proposals.
-4. Playlist plans bind each item to the exact authorizing decision-event ID; changed decisions make an old plan stale.
-5. API execution is dry-run by default and performs writes only with `--apply`.
-6. Watch Later removal is not performed by playlist synchronization.
+2. LLM output is advisory evidence, not a `decision_event`.
+3. Playlist and Watch Later execution bind to exact decision-event IDs; changed decisions
+   make old plans stale.
+4. A `move` is never removed from Watch Later until the same move decision has a confirmed
+   destination insertion/live membership checkpoint.
+5. API/browser execution is dry-run by default.
 
 ## 2. Install
 
@@ -55,24 +62,31 @@ python -m venv .venv
 pip install -e .
 ```
 
-For authenticated normal-playlist synchronization through Google's YouTube Data API:
+Optional normal-playlist API support:
 
 ```bash
 pip install -e '.[youtube-api]'
 ```
 
-Installed commands include:
+Optional Watch Later browser support:
 
-- `watchlater` — import, reports, selections, rules, live metadata repair and archive recovery.
+```bash
+pip install -e '.[browser]'
+playwright install chromium
+```
+
+Important commands:
+
+- `watchlater` — import, reports, selections, rules, metadata repair and archive recovery.
 - `watchlater-dearrow` — DeArrow alternate-title enrichment.
-- `watchlater-metadata` — selective rich yt-dlp metadata/description enrichment.
-- `watchlater-transcript` — selective existing-caption acquisition.
-- `watchlater-llm` — provider setup, first-pass classification and description refinement.
-- `watchlater-llm-transcript` — transcript-aware refinement.
-- `watchlater-review` — local HTML review plus explicit human-decision import.
-- `watchlater-playlist` — playlist inventory, planning and optional API execution.
+- `watchlater-metadata` — selective full yt-dlp metadata/description enrichment.
+- `watchlater-transcript` — selective caption acquisition.
+- `watchlater-llm` / `watchlater-llm-transcript` — LLM classification/refinement.
+- `watchlater-review` — local HTML review and human override import.
+- `watchlater-playlist` — normal-playlist inventory, planning and API execution.
+- `watchlater-remove` — selective Watch Later planning and Playwright execution.
 
-Most commands default to `watchlater.sqlite3`. Put `--db PATH` before the subcommand to use another catalogue.
+Most commands default to `watchlater.sqlite3`.
 
 ## 3. Export and import Watch Later
 
@@ -88,9 +102,8 @@ watchlater import watch-later.json
 watchlater snapshots
 ```
 
-Change `firefox` if needed. The importer hashes the source file, so re-importing the exact same export is idempotent. Later exports become separate snapshots.
-
-Playlist position is preserved exactly, but should not be interpreted as age unless you deliberately established that ordering before export.
+The importer preserves exact playlist position and hashes the export, so importing the same
+file again is idempotent. Later exports become separate snapshots.
 
 ## 4. Inspect and repair metadata
 
@@ -100,25 +113,14 @@ watchlater videos --unknown-creator --remaining
 watchlater videos --unavailable
 ```
 
-Repair otherwise-live videos whose flat export lacks creator metadata:
+Repair flat-playlist creator gaps:
 
 ```bash
 watchlater enrich --missing-creator --dry-run
 watchlater enrich --missing-creator
 ```
 
-Or target one ID:
-
-```bash
-watchlater enrich --video-id VIDEO_ID
-watchlater enrich --video-id VIDEO_ID --refresh
-```
-
-The imported snapshot is unchanged; yt-dlp data is stored as a separate observation.
-
-## 5. Recover private/deleted videos
-
-Run archive recovery incrementally:
+Recover private/deleted metadata incrementally:
 
 ```bash
 watchlater recover --unavailable --limit 10
@@ -126,26 +128,10 @@ watchlater videos --unavailable --recovered
 watchlater videos --unavailable --unrecovered
 ```
 
-Normal runs skip cached found/not-found results before applying `--limit`, so repeating the command advances through the uncached remainder.
+Cached archive results are skipped before `--limit`, so repeated runs advance through the
+uncached remainder. Prefer explicit targets for `--refresh`.
 
-Inspect one cached lookup:
-
-```bash
-watchlater recovery VIDEO_ID
-watchlater recovery VIDEO_ID --raw
-```
-
-For refreshes, prefer an explicit target:
-
-```bash
-watchlater recover --video-id ID1 --video-id ID2 --refresh
-watchlater recover --selection 12 --refresh
-watchlater recover --unavailable --min-position 4908 --max-position 4920 --refresh
-```
-
-Recovery currently uses FindYouTubeVideo discovery, Filmot metadata, PreserveTube fallback and specific Wayback watch-page captures. Recovered values remain separate from the unavailable source row.
-
-## 6. Cheap/manual triage before LLMs
+## 5. Cheap/manual triage first
 
 Creators:
 
@@ -155,19 +141,12 @@ watchlater select creator CHANNEL_ID --remaining
 watchlater selection show
 ```
 
-Titles:
+Titles and phrases:
 
 ```bash
 watchlater select title --contains 'Super Mario' --remaining
 watchlater select title --regex 'conference|keynote' --remaining --max-duration 2h
-```
-
-Keyword/phrase discovery:
-
-```bash
-watchlater keywords --remaining --ngram 1 --min-count 3
 watchlater keywords --remaining --ngram 2 --min-count 3
-watchlater keywords --remaining --ngram 3 --min-count 3
 ```
 
 Record local decisions:
@@ -178,362 +157,277 @@ watchlater selection action archive
 watchlater selection action delete --reason 'stale event/news item'
 ```
 
-Actions mean:
+Actions:
 
-- `keep` — leave in Watch Later.
-- `review` — do nothing yet.
-- `archive` — worthwhile reference; eventual Watch Later removal is a separate executor.
-- `delete` — discard candidate; eventual Watch Later removal is a separate executor.
-- `move` — destination playlist assignment; normal-playlist synchronization can execute the add, but Watch Later removal remains separate.
+- `keep` — leave in Watch Later;
+- `review` — unresolved;
+- `archive` — worthwhile reference, later remove from Watch Later;
+- `delete` — discard candidate, later remove from Watch Later;
+- `move` — add to a destination first, then remove from Watch Later.
 
-Undo while preserving history:
-
-```bash
-watchlater selection undo
-```
-
-Export a cohort when useful:
+Reusable rules:
 
 ```bash
-watchlater selection export --format json --output cohort.json
-watchlater selection export --format csv --output cohort.csv
-```
-
-## 7. Reusable rules
-
-```bash
-watchlater select creator CHANNEL_ID --remaining
-watchlater selection save-rule \
-    'electronics creator' \
-    move \
-    --playlist 'Queue - Electronics' \
-    --priority 20
-
-watchlater rules list
+watchlater selection save-rule 'electronics creator' move \
+    --playlist 'Queue - Electronics' --priority 20
 watchlater rules apply --dry-run
 watchlater rules apply
 ```
 
-Rules only act on unresolved videos. Existing human decisions are never overwritten. Lower numeric priority runs first, then rule ID.
+Rules only act on unresolved videos and never overwrite existing human decisions.
 
-## 8. DeArrow alternate titles
+## 6. DeArrow and LLM classification
+
+DeArrow:
 
 ```bash
 watchlater-dearrow enrich --all --remaining
-watchlater-dearrow show VIDEO_ID
 ```
 
-Useful cache/privacy controls:
+Configure providers using `examples/watchlater.example.toml` and an interest brief. The same
+OpenAI-compatible transport supports Ollama, Unsloth models served through vLLM/Ollama/
+llama-server, OpenRouter, and compatible remote endpoints.
 
-```bash
-watchlater-dearrow enrich --all --max-age 7d
-watchlater-dearrow enrich --video-id VIDEO_ID --refresh
-watchlater-dearrow enrich --all --remaining --hash-prefix
-```
-
-The imported YouTube title remains separate. Only a trusted first DeArrow submission (`locked` or non-negative votes) becomes the preferred alternate title; `original=true` keeps the YouTube title preferred.
-
-See [`docs/dearrow.md`](docs/dearrow.md).
-
-## 9. Configure LLM providers
-
-Copy the examples:
-
-```bash
-cp examples/watchlater.example.toml watchlater.toml
-cp examples/interests.example.md interests.md
-```
-
-The same OpenAI-compatible transport supports Ollama, Unsloth models served through vLLM/llama-server/Ollama, OpenRouter, and arbitrary compatible endpoints.
-
-Example Ollama profile:
-
-```toml
-[providers.ollama-local]
-preset = 'ollama'
-model = 'qwen3:14b'
-structured_mode = 'json_object'
-```
-
-Example Unsloth/vLLM profile:
-
-```toml
-[providers.unsloth-local]
-preset = 'unsloth'
-model = 'my-org/my-unsloth-model'
-structured_mode = 'json_schema'
-```
-
-Example OpenRouter profile:
-
-```toml
-[providers.openrouter]
-preset = 'openrouter'
-model = 'openai/gpt-5.4'
-
-[providers.openrouter.headers]
-HTTP-Referer = 'https://github.com/philpem/youtube-watchlater-tidy'
-X-Title = 'youtube-watchlater-tidy'
-```
-
-```bash
-export OPENROUTER_API_KEY='...'
-```
-
-Verify the provider and effective prompt:
+Verify a provider:
 
 ```bash
 watchlater-llm --config watchlater.toml providers
 watchlater-llm --config watchlater.toml probe --provider ollama-local
-watchlater-llm --config watchlater.toml prompt
-watchlater-llm --config watchlater.toml prompt --hash-only
 ```
 
-Literal API keys in TOML are rejected. See [`docs/llm.md`](docs/llm.md).
-
-## 10. First-pass LLM classification
-
-Inspect exact evidence first:
+First pass:
 
 ```bash
 watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --dry-run
-```
-
-Then classify:
-
-```bash
 watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --batch-size 5
 ```
 
-Validated LLM results are append-only advisory evidence. Exact provider+prompt+ordered-evidence runs are cached.
+LLM results are append-only advisory evidence and are cached by provider/prompt/evidence.
+
+## 7. Description and transcript escalation
+
+For a run that requested descriptions:
 
 ```bash
-watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20 --refresh
-watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20 --no-store
-watchlater-llm --config watchlater.toml results --run-id 12
-```
-
-## 11. Description refinement
-
-For parent run 12:
-
-```bash
-watchlater-metadata enrich --llm-needs-description --run-id 12 --dry-run
 watchlater-metadata enrich --llm-needs-description --run-id 12
-
-watchlater-llm --config watchlater.toml refine-description \
-    --run-id 12 --provider ollama-local --dry-run
 watchlater-llm --config watchlater.toml refine-description \
     --run-id 12 --provider ollama-local
 ```
 
-Only unresolved `needs_description=true` rows with an available description are refined. The child LLM run records its parent and evidence provenance.
-
-## 12. Caption acquisition and transcript refinement
-
-Fetch captions only for a parent run's `needs_transcript=true` subset:
+For a run that requested transcripts:
 
 ```bash
-watchlater-transcript fetch --llm-needs-transcript --run-id 18 --dry-run
 watchlater-transcript fetch --llm-needs-transcript --run-id 18
+watchlater-llm-transcript --config watchlater.toml \
+    --run-id 18 --provider ollama-local
 ```
 
-Manual captions are preferred; automatic captions are fallback unless `--no-auto` is used. Missing captions are not a negative quality signal.
+Existing manual captions are preferred; automatic captions are fallback. Audio is not
+transcribed by default.
 
-Then refine:
-
-```bash
-watchlater-llm-transcript \
-    --config watchlater.toml \
-    --run-id 18 \
-    --provider ollama-local \
-    --dry-run
-
-watchlater-llm-transcript \
-    --config watchlater.toml \
-    --run-id 18 \
-    --provider ollama-local
-```
-
-Long transcripts use deterministic beginning/middle/end sampling within a configurable character budget. See [`docs/transcripts.md`](docs/transcripts.md).
-
-## 13. Human review
-
-Build a self-contained local report:
+## 8. Human review
 
 ```bash
 watchlater-review build review.html
 ```
 
-The report displays current human/rule decisions and latest LLM suggestions separately. Choose explicit `keep`, `review`, `archive` or `delete` overrides and export the JSON file.
-
-Validate before import:
+Open the self-contained HTML file locally, review current decisions and LLM suggestions, and
+export explicit overrides. Validate before import:
 
 ```bash
 watchlater-review import watchlater-review-1.json --dry-run
-```
-
-Then apply:
-
-```bash
 watchlater-review import watchlater-review-1.json
 ```
 
-Imported overrides become append-only `decision_events` with `source=human-review-report`. Re-importing an identical current review action/reason is idempotent. See [`docs/review.md`](docs/review.md).
+Imported overrides become append-only human decision events.
 
-## 14. Plan normal-playlist synchronization
+## 9. Plan and execute destination playlist moves
 
-Playlist synchronization consumes only current local `move` decisions.
-
-### Offline/manual inventory
-
-```bash
-watchlater-playlist inventory import playlist-inventory.json
-watchlater-playlist inventory show
-```
-
-### Authenticated API inventory
-
-Install the optional extra first:
-
-```bash
-pip install -e '.[youtube-api]'
-```
-
-Create a Google OAuth **Desktop app** client in a Cloud project with the YouTube Data API enabled and place the downloaded secret at `client_secret.json`, or provide another path.
-
-Refresh live owned playlists/membership:
+Install the API extra, create a Google OAuth Desktop client, and refresh owned playlists:
 
 ```bash
 watchlater-playlist inventory refresh
 ```
 
-Defaults:
-
-```text
-client secrets: client_secret.json
-OAuth token:    .youtube-watchlater-token.json
-```
-
-Both default credential/token names are ignored by Git. Override them with `--client-secrets` and `--token`.
-
-### Create a persistent move plan
+Create a plan from current `move` decisions:
 
 ```bash
 watchlater-playlist plan --backend api --output playlist-plan.json
 watchlater-playlist show
 ```
 
-Planning resolves known destination titles to stable playlist IDs, marks missing destinations `create_planned`, records known membership as `already_present`, estimates API quota, and stores the exact decision-event ID authorizing every item.
-
-The default planner assumptions are 50 units per playlist creation/insertion and a 10,000-unit allowance; override them explicitly if your project/account policy differs.
-
-See [`docs/playlist-sync.md`](docs/playlist-sync.md).
-
-## 15. Execute a normal-playlist API plan
-
-Execution is **dry-run by default**:
+Inspect execution without any writes:
 
 ```bash
-watchlater-playlist execute --run-id 4
+watchlater-playlist execute --run-id PLAN_ID
 ```
 
-No OAuth client or external write is created in this mode.
-
-After reviewing the plan, apply it explicitly:
+Apply cautiously:
 
 ```bash
-watchlater-playlist execute --run-id 4 --apply
+watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
 ```
 
-A real API run:
+The executor checks live membership before insertion, checkpoints every result, refuses stale
+plans, and resumes without repeating confirmed work. See [`docs/playlist-sync.md`](docs/playlist-sync.md).
 
-- refuses stale plan items before writes;
-- refuses an over-quota plan unless `--allow-over-quota` is explicitly repeated;
-- re-lists live owned playlists;
-- uses stable IDs for destinations known at planning time;
-- resolves `create_planned` names against the live account before creating anything;
-- refuses ambiguous titles;
-- refuses to silently recreate a previously known playlist ID that disappeared;
-- re-checks the authorizing decision immediately before each membership/write operation;
-- checks live membership immediately before each insertion;
-- treats a live duplicate as `already_present` success;
-- checkpoints playlist creation, insertion and failures in SQLite;
-- updates the local inventory after confirmed writes.
+## 10. Build a Watch Later removal plan
 
-Limit actual writes for a cautious rollout:
+Removal planning consumes current `delete`/`archive` decisions and eligible `move` decisions:
 
 ```bash
-watchlater-playlist execute --run-id 4 --apply --max-writes 5
+watchlater-remove plan --output removal-plan.json
+watchlater-remove show
 ```
 
-`--max-writes` counts playlist creations + item insertions. Hitting the cap leaves a partial run; rerun the same command later to resume from checkpoints.
+A `move` is eligible only when its exact current decision has a confirmed destination
+checkpoint (`inserted`, or `already_present` after a live re-check). Inventory-only knowledge
+is deliberately insufficient.
 
-Use alternate OAuth files if desired:
+Old removal plans are reported stale when the current action/destination/decision event
+changes.
+
+## 11. Set up the Playwright Watch Later profile
+
+Use a dedicated automation profile, not your normal browser profile:
 
 ```bash
-watchlater-playlist execute --run-id 4 --apply \
-    --client-secrets ~/private/youtube-client.json \
-    --token ~/private/youtube-token.json
+watchlater-remove login
 ```
 
-A confirmed playlist insertion does **not** remove the video from Watch Later. That remains issue #7 and must only happen after destination success for a `move` decision.
+The default profile directory is:
 
-## 16. Recommended end-to-end sequence
+```text
+.watchlater-playwright-profile/
+```
+
+It is ignored by Git. Sign in to YouTube manually in the opened browser, return to the
+terminal, then press Enter to close it.
+
+## 12. Dry-run selective Watch Later execution
+
+Inspect the latest or selected persisted plan without opening a browser:
 
 ```bash
-# Export/import
+watchlater-remove execute --run-id REMOVAL_PLAN_ID
+```
+
+Without `--apply`, there is no browser creation and no checkpoint mutation.
+
+## 13. Apply selective Watch Later removal
+
+Real removal requires **two explicit flags**:
+
+```bash
+watchlater-remove execute --run-id REMOVAL_PLAN_ID \
+    --apply \
+    --confirm-remove
+```
+
+Start with a small cap:
+
+```bash
+watchlater-remove execute --run-id REMOVAL_PLAN_ID \
+    --apply --confirm-remove \
+    --max-deletes 3
+```
+
+The executor:
+
+- refuses stale plans before launching a destructive run;
+- rechecks authorization before each browser attempt;
+- finds rows by exact YouTube video ID rather than playlist order;
+- verifies the row's exact `v=VIDEO_ID` identity before opening its menu;
+- verifies that identity again immediately before clicking `Remove from Watch later`;
+- confirms the exact row disappeared after the click;
+- distinguishes `removed`, `already_absent`, `not_found`, and `failed`;
+- retries retriable failures with configurable exponential backoff;
+- checkpoints results and skips terminal successes on resume;
+- preserves the imported catalogue/snapshot after successful removal.
+
+Default safety controls include a maximum of 10 removals per invocation, a 2-second interval
+between confirmed removals, one retry, and conservative scrolling. Override only when needed:
+
+```bash
+watchlater-remove execute --run-id REMOVAL_PLAN_ID \
+    --apply --confirm-remove \
+    --max-deletes 5 --interval 3 --retries 2 --backoff 3
+```
+
+For localized YouTube UIs, set the destructive menu text explicitly rather than allowing the
+tool to guess:
+
+```bash
+watchlater-remove execute --run-id REMOVAL_PLAN_ID \
+    --apply --confirm-remove \
+    --remove-label 'Remove from Watch later'
+```
+
+Headed mode is the default so destructive behavior is visible. `--headless` is available only
+for an already validated setup.
+
+See [`docs/watchlater-removal.md`](docs/watchlater-removal.md).
+
+## 14. Recommended end-to-end sequence
+
+```bash
+# export/import
 yt-dlp --cookies-from-browser firefox --flat-playlist --dump-single-json \
     'https://www.youtube.com/playlist?list=WL' > watch-later.json
 watchlater import watch-later.json
 
-# Repair/recover obvious metadata gaps
+# repair/recover metadata and perform cheap triage
 watchlater enrich --missing-creator
 watchlater recover --unavailable --limit 20
-
-# Cheap triage
 watchlater creators --remaining
 watchlater keywords --remaining --ngram 2 --min-count 3
-# ... select/action obvious cohorts; save useful rules ...
 
-# Semantic evidence/classification
+# semantic classification/refinement as needed
 watchlater-dearrow enrich --all --remaining
-watchlater-llm --config watchlater.toml classify \
-    --provider ollama-local --limit 20 --batch-size 5
-# ... selectively fetch descriptions/captions and refine only when requested ...
+watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20
 
-# Human review
+# human review
 watchlater-review build review.html
-# ... export explicit overrides from the browser ...
 watchlater-review import watchlater-review-1.json --dry-run
 watchlater-review import watchlater-review-1.json
 
-# Refresh normal playlists and plan reviewed/rule-approved moves
+# execute reviewed/rule-approved moves first
 watchlater-playlist inventory refresh
 watchlater-playlist plan --backend api
 watchlater-playlist execute --run-id PLAN_ID
-
-# Only after reviewing the dry-run:
 watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
+
+# then build source-removal plan; unconfirmed moves are blocked automatically
+watchlater-remove plan
+watchlater-remove execute --run-id REMOVAL_PLAN_ID
+
+# only after reviewing that dry-run
+watchlater-remove execute --run-id REMOVAL_PLAN_ID \
+    --apply --confirm-remove --max-deletes 3
 ```
 
-## 17. Current limitations
+## 15. Current limitations
 
-- Watch Later removal is **not yet implemented** in the selective workflow. `delete`/`archive` are still local decisions, and successful `move` insertion does not remove the source Watch Later item.
-- Browser-backed bulk destination-playlist execution is not yet implemented; current real playlist writes use the official API backend.
-- One current `move` decision targets one destination playlist; explicit multi-destination execution is not yet modelled.
-- Transcript escalation deliberately uses existing captions only; audio download/transcription is not performed by default.
+- Browser-backed **destination-playlist insertion** is not implemented; current real normal-
+  playlist writes use the official YouTube Data API backend.
+- One current `move` decision targets one destination playlist; explicit multi-destination
+  execution is not yet modelled.
+- Watch Later UI selectors/text can change without notice; browser execution deliberately
+  fails rather than guessing when identity/menu checks do not match.
+- Transcript escalation uses existing captions only; audio transcription is not performed by
+  default.
 
-## 18. Detailed documentation
+## 16. Detailed documentation
 
 - [`docs/dearrow.md`](docs/dearrow.md) — alternate-title trust/privacy.
 - [`docs/llm.md`](docs/llm.md) — LLM provider configuration.
-- [`docs/llm-classification.md`](docs/llm-classification.md) — evidence, validation and LLM history.
+- [`docs/llm-classification.md`](docs/llm-classification.md) — evidence/validation/history.
 - [`docs/rich-metadata.md`](docs/rich-metadata.md) — selective descriptions/metadata.
 - [`docs/transcripts.md`](docs/transcripts.md) — caption acquisition/refinement.
 - [`docs/review.md`](docs/review.md) — static HTML human review.
-- [`docs/playlist-sync.md`](docs/playlist-sync.md) — destination inventory, planning and API execution.
+- [`docs/playlist-sync.md`](docs/playlist-sync.md) — destination planning/API execution.
+- [`docs/watchlater-removal.md`](docs/watchlater-removal.md) — selective source removal.
 
 Use `COMMAND --help` as the definitive option reference for the installed version.

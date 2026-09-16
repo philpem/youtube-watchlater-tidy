@@ -20,6 +20,9 @@ youtube-api = [
     "google-auth-oauthlib>=1.0",
     "google-auth-httplib2>=0.2",
 ]
+browser = [
+    "playwright>=1.60,<2",
+]
 
 [project.scripts]
 watchlater = "youtube_watchlater_tidy.cli:main"
