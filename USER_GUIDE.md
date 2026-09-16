@@ -2,7 +2,7 @@
 
 This is the operating guide for the **implemented** workflow. Detailed reference notes live in [`docs/`](docs/).
 
-The project is deliberately conservative: imported Watch Later snapshots are evidence; human/rule decisions outrank LLM suggestions; and YouTube-writing commands require an explicit execution step. Keep backups of both `watch-later.json` and `watchlater.sqlite3`.
+The project is deliberately conservative: imported Watch Later snapshots are evidence; human/rule decisions outrank LLM suggestions; and YouTube-writing commands require explicit execution steps. Keep backups of both `watch-later.json` and `watchlater.sqlite3`.
 
 ## 1. Workflow at a glance
 
@@ -32,8 +32,14 @@ self-contained HTML human review
 current reviewed/rule decisions
       |
       +--> move -> destination playlist plan -> optional YouTube Data API execution
-      |
-      +--> delete/archive -> Watch Later removal is still a separate future executor
+      |                                                   |
+      |                                                   v
+      |                                      confirmed destination checkpoint
+      |                                                   |
+      +--> delete/archive --------------------------------+
+                                                          |
+                                                          v
+                                            selective Watch Later removal
 ```
 
 Important invariants:
@@ -41,9 +47,10 @@ Important invariants:
 1. Enrichment never rewrites imported snapshot fields.
 2. LLM suggestions are advisory evidence, never automatic `decision_events`.
 3. Playlist execution only consumes **current local `move` decisions**, not raw LLM proposals.
-4. Playlist plans bind each item to the exact authorizing decision-event ID; changed decisions make an old plan stale.
-5. API execution is dry-run by default and performs writes only with `--apply`.
-6. Watch Later removal is not performed by playlist synchronization.
+4. Playlist and Watch Later plans bind each item to the exact authorizing decision-event ID; changed decisions make old plans stale.
+5. API playlist execution is dry-run by default and performs writes only with `--apply`.
+6. Watch Later removal is a separate destructive executor and requires both `--apply` and `--confirm-remove`.
+7. A `move` is never removed from Watch Later until the same move decision has a confirmed destination insertion/live-membership checkpoint.
 
 ## 2. Install
 
@@ -61,6 +68,13 @@ For authenticated normal-playlist synchronization through Google's YouTube Data 
 pip install -e '.[youtube-api]'
 ```
 
+For selective browser-based Watch Later removal:
+
+```bash
+pip install -e '.[browser]'
+playwright install chromium
+```
+
 Installed commands include:
 
 - `watchlater` — import, reports, selections, rules, live metadata repair and archive recovery.
@@ -70,7 +84,8 @@ Installed commands include:
 - `watchlater-llm` — provider setup, first-pass classification and description refinement.
 - `watchlater-llm-transcript` — transcript-aware refinement.
 - `watchlater-review` — local HTML review plus explicit human-decision import.
-- `watchlater-playlist` — playlist inventory, planning and optional API execution.
+- `watchlater-playlist` — normal-playlist inventory, planning and optional YouTube Data API execution.
+- `watchlater-remove` — exact-ID Watch Later removal planning and Playwright execution.
 
 Most commands default to `watchlater.sqlite3`. Put `--db PATH` before the subcommand to use another catalogue.
 
@@ -182,9 +197,9 @@ Actions mean:
 
 - `keep` — leave in Watch Later.
 - `review` — do nothing yet.
-- `archive` — worthwhile reference; eventual Watch Later removal is a separate executor.
-- `delete` — discard candidate; eventual Watch Later removal is a separate executor.
-- `move` — destination playlist assignment; normal-playlist synchronization can execute the add, but Watch Later removal remains separate.
+- `archive` — worthwhile reference; remove from Watch Later only during explicit execution.
+- `delete` — discard candidate; remove from Watch Later only during explicit execution.
+- `move` — add to a destination playlist first; source removal is gated on confirmed destination success.
 
 Undo while preserving history:
 
@@ -246,7 +261,7 @@ cp examples/interests.example.md interests.md
 
 The same OpenAI-compatible transport supports Ollama, Unsloth models served through vLLM/llama-server/Ollama, OpenRouter, and arbitrary compatible endpoints.
 
-Example Ollama profile:
+Ollama example:
 
 ```toml
 [providers.ollama-local]
@@ -255,7 +270,7 @@ model = 'qwen3:14b'
 structured_mode = 'json_object'
 ```
 
-Example Unsloth/vLLM profile:
+Unsloth/vLLM example:
 
 ```toml
 [providers.unsloth-local]
@@ -264,7 +279,7 @@ model = 'my-org/my-unsloth-model'
 structured_mode = 'json_schema'
 ```
 
-Example OpenRouter profile:
+OpenRouter example:
 
 ```toml
 [providers.openrouter]
@@ -280,7 +295,7 @@ X-Title = 'youtube-watchlater-tidy'
 export OPENROUTER_API_KEY='...'
 ```
 
-Verify the provider and effective prompt:
+Verify provider and prompt:
 
 ```bash
 watchlater-llm --config watchlater.toml providers
@@ -387,26 +402,12 @@ Imported overrides become append-only `decision_events` with `source=human-revie
 
 Playlist synchronization consumes only current local `move` decisions.
 
-### Offline/manual inventory
-
-```bash
-watchlater-playlist inventory import playlist-inventory.json
-watchlater-playlist inventory show
-```
-
 ### Authenticated API inventory
 
-Install the optional extra first:
+Install the optional extra and create a Google OAuth **Desktop app** client in a Cloud project with the YouTube Data API enabled. Place the downloaded secret at `client_secret.json`, or provide another path.
 
 ```bash
 pip install -e '.[youtube-api]'
-```
-
-Create a Google OAuth **Desktop app** client in a Cloud project with the YouTube Data API enabled and place the downloaded secret at `client_secret.json`, or provide another path.
-
-Refresh live owned playlists/membership:
-
-```bash
 watchlater-playlist inventory refresh
 ```
 
@@ -419,6 +420,13 @@ OAuth token:    .youtube-watchlater-token.json
 
 Both default credential/token names are ignored by Git. Override them with `--client-secrets` and `--token`.
 
+Offline/manual inventory remains supported:
+
+```bash
+watchlater-playlist inventory import playlist-inventory.json
+watchlater-playlist inventory show
+```
+
 ### Create a persistent move plan
 
 ```bash
@@ -426,9 +434,7 @@ watchlater-playlist plan --backend api --output playlist-plan.json
 watchlater-playlist show
 ```
 
-Planning resolves known destination titles to stable playlist IDs, marks missing destinations `create_planned`, records known membership as `already_present`, estimates API quota, and stores the exact decision-event ID authorizing every item.
-
-The default planner assumptions are 50 units per playlist creation/insertion and a 10,000-unit allowance; override them explicitly if your project/account policy differs.
+Planning resolves known destination titles to stable playlist IDs, marks missing destinations `create_planned`, records known membership, estimates API quota, and stores the exact decision-event ID authorizing every item.
 
 See [`docs/playlist-sync.md`](docs/playlist-sync.md).
 
@@ -445,43 +451,102 @@ No OAuth client or external write is created in this mode.
 After reviewing the plan, apply it explicitly:
 
 ```bash
-watchlater-playlist execute --run-id 4 --apply
+watchlater-playlist execute --run-id 4 --apply --max-writes 5
 ```
 
 A real API run:
 
 - refuses stale plan items before writes;
-- refuses an over-quota plan unless `--allow-over-quota` is explicitly repeated;
+- refuses over-quota plans unless `--allow-over-quota` is explicitly repeated;
 - re-lists live owned playlists;
 - uses stable IDs for destinations known at planning time;
 - resolves `create_planned` names against the live account before creating anything;
-- refuses ambiguous titles;
-- refuses to silently recreate a previously known playlist ID that disappeared;
+- refuses ambiguous titles or a previously known playlist ID that disappeared;
 - re-checks the authorizing decision immediately before each membership/write operation;
-- checks live membership immediately before each insertion;
-- treats a live duplicate as `already_present` success;
-- checkpoints playlist creation, insertion and failures in SQLite;
-- updates the local inventory after confirmed writes.
+- checks live membership immediately before every insertion, including planner-time `already_present` rows on first execution;
+- checkpoints playlist creation, insertion, live duplicates and failures;
+- updates the local inventory after confirmed writes;
+- resumes idempotently after `--max-writes` or an interruption.
 
-Limit actual writes for a cautious rollout:
+A successful `move` checkpoint does not itself remove the video from Watch Later. That is deliberately the next executor.
 
-```bash
-watchlater-playlist execute --run-id 4 --apply --max-writes 5
-```
+## 16. Plan selective Watch Later removal
 
-`--max-writes` counts playlist creations + item insertions. Hitting the cap leaves a partial run; rerun the same command later to resume from checkpoints.
-
-Use alternate OAuth files if desired:
+Install Playwright support:
 
 ```bash
-watchlater-playlist execute --run-id 4 --apply \
-    --client-secrets ~/private/youtube-client.json \
-    --token ~/private/youtube-token.json
+pip install -e '.[browser]'
+playwright install chromium
 ```
 
-A confirmed playlist insertion does **not** remove the video from Watch Later. That remains issue #7 and must only happen after destination success for a `move` decision.
+Create the dedicated persistent browser profile and sign in manually once:
 
-## 16. Recommended end-to-end sequence
+```bash
+watchlater-remove login
+```
+
+Create a removal plan from current decisions:
+
+```bash
+watchlater-remove plan --output watchlater-removal-plan.json
+watchlater-remove show
+```
+
+Eligibility rules:
+
+- current `delete` -> eligible;
+- current `archive` -> eligible;
+- current `move` -> eligible **only** if the same decision-event ID has a confirmed destination checkpoint (`inserted`, or live-verified `already_present`);
+- `keep` / `review` -> never eligible.
+
+Moves that have not been safely copied are listed under `blocked_moves` and are not added to the destructive plan.
+
+Every removal item stores the exact authorizing decision-event ID. If the action/destination changes later, the old plan becomes stale and execution refuses it.
+
+## 17. Execute selective Watch Later removal
+
+Dry-run inspection performs no browser launch and no removal:
+
+```bash
+watchlater-remove execute --run-id 3
+```
+
+Actual deletion requires **both** explicit destructive flags:
+
+```bash
+watchlater-remove execute --run-id 3 \
+    --apply \
+    --confirm-remove \
+    --max-deletes 2
+```
+
+The default successful-removal cap is 10 per invocation. The default pacing is 2 seconds after each confirmed removal, with one retry and exponential backoff.
+
+The Playwright adapter never trusts playlist order. For each item it scrolls/searches for an href whose parsed `v=` value exactly matches the planned video ID, verifies that exact row before opening the action menu, and verifies the exact ID again immediately before clicking `Remove from Watch later`.
+
+Checkpoint outcomes are distinct:
+
+- `removed` — destructive click succeeded and the exact row disappeared;
+- `already_absent` — a stable full scan completed without that exact ID;
+- `not_found` — the configured scroll bound was reached before a stable full scan;
+- `failed` — DOM/menu/browser/identity verification failed.
+
+`removed` and `already_absent` are terminal. `not_found` and `failed` remain retriable on later execution runs.
+
+If YouTube hides unavailable entries, enable **Show unavailable videos** in the Watch Later UI before trying to remove private/deleted placeholders.
+
+For localized YouTube UIs, override the labels used for the row menu/removal command:
+
+```bash
+watchlater-remove execute --run-id 3 \
+    --apply --confirm-remove \
+    --action-menu-label 'Action menu' \
+    --remove-label 'Remove from Watch later'
+```
+
+See [`docs/watchlater-removal.md`](docs/watchlater-removal.md).
+
+## 18. Recommended end-to-end sequence
 
 ```bash
 # Export/import
@@ -489,7 +554,7 @@ yt-dlp --cookies-from-browser firefox --flat-playlist --dump-single-json \
     'https://www.youtube.com/playlist?list=WL' > watch-later.json
 watchlater import watch-later.json
 
-# Repair/recover obvious metadata gaps
+# Repair/recover metadata gaps
 watchlater enrich --missing-creator
 watchlater recover --unavailable --limit 20
 
@@ -510,23 +575,29 @@ watchlater-review build review.html
 watchlater-review import watchlater-review-1.json --dry-run
 watchlater-review import watchlater-review-1.json
 
-# Refresh normal playlists and plan reviewed/rule-approved moves
+# Preserve reviewed move decisions in normal playlists
 watchlater-playlist inventory refresh
 watchlater-playlist plan --backend api
 watchlater-playlist execute --run-id PLAN_ID
-
-# Only after reviewing the dry-run:
+# ... inspect ...
 watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
+
+# Build the source-removal plan; unconfirmed moves will be blocked
+watchlater-remove plan
+watchlater-remove execute --run-id REMOVE_PLAN_ID
+# ... inspect carefully ...
+watchlater-remove execute --run-id REMOVE_PLAN_ID \
+    --apply --confirm-remove --max-deletes 2
 ```
 
-## 17. Current limitations
+## 19. Current limitations
 
-- Watch Later removal is **not yet implemented** in the selective workflow. `delete`/`archive` are still local decisions, and successful `move` insertion does not remove the source Watch Later item.
-- Browser-backed bulk destination-playlist execution is not yet implemented; current real playlist writes use the official API backend.
+- Browser-backed **destination playlist insertion** for quota-heavy moves is not yet implemented; current normal-playlist writes use the official API backend.
 - One current `move` decision targets one destination playlist; explicit multi-destination execution is not yet modelled.
 - Transcript escalation deliberately uses existing captions only; audio download/transcription is not performed by default.
+- YouTube's browser DOM is not a stable API. Browser removal is therefore deliberately conservative, checkpointed, bounded and configurable.
 
-## 18. Detailed documentation
+## 20. Detailed documentation
 
 - [`docs/dearrow.md`](docs/dearrow.md) — alternate-title trust/privacy.
 - [`docs/llm.md`](docs/llm.md) — LLM provider configuration.
@@ -535,5 +606,6 @@ watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
 - [`docs/transcripts.md`](docs/transcripts.md) — caption acquisition/refinement.
 - [`docs/review.md`](docs/review.md) — static HTML human review.
 - [`docs/playlist-sync.md`](docs/playlist-sync.md) — destination inventory, planning and API execution.
+- [`docs/watchlater-removal.md`](docs/watchlater-removal.md) — selective Playwright Watch Later removal and destructive safety rules.
 
 Use `COMMAND --help` as the definitive option reference for the installed version.

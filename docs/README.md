@@ -10,6 +10,7 @@ Focused reference notes:
 - [`rich-metadata.md`](rich-metadata.md) — selective yt-dlp rich metadata/description enrichment.
 - [`transcripts.md`](transcripts.md) — selective caption acquisition plus transcript-aware LLM refinement.
 - [`review.md`](review.md) — self-contained HTML human review and explicit override import.
-- [`playlist-sync.md`](playlist-sync.md) — destination-playlist inventory, dry-run planning, checkpoint state and quota estimates.
+- [`playlist-sync.md`](playlist-sync.md) — destination-playlist inventory, planning, API execution, checkpoint state and quota controls.
+- [`watchlater-removal.md`](watchlater-removal.md) — selective Playwright Watch Later removal, move gating and destructive safety checks.
 
 The user guide distinguishes implemented behavior from planned work. `COMMAND --help` is the definitive option reference for the installed version.
