@@ -11,6 +11,7 @@ Focused reference notes:
 - [`transcripts.md`](transcripts.md) — selective caption acquisition plus transcript-aware LLM refinement.
 - [`review.md`](review.md) — self-contained HTML human review and explicit override import.
 - [`playlist-sync.md`](playlist-sync.md) — destination-playlist inventory, planning, API execution and checkpoints.
+- [`playlist-browser.md`](playlist-browser.md) — browser destination-playlist executor protocol, safety semantics and checkpoint foundation.
 - [`watchlater-removal.md`](watchlater-removal.md) — selective Watch Later removal planning, move gating and checkpoint states.
 
 The user guide distinguishes implemented behavior from planned work. `COMMAND --help` is the definitive option reference for the installed version.
