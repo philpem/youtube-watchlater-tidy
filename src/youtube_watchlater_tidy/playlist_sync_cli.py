@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .db import open_catalogue
+from .playlist_browser import execute_browser_plan
 from .playlist_sync import (
     DEFAULT_API_QUOTA_LIMIT,
     DEFAULT_PLAYLIST_CREATE_COST,
@@ -92,24 +93,24 @@ def _parser() -> argparse.ArgumentParser:
 
     execute = sub.add_parser(
         "execute",
-        help="inspect or apply one persisted API playlist plan (dry-run unless --apply)",
+        help="inspect or apply one persisted playlist plan (dry-run unless --apply)",
     )
     execute.add_argument("--run-id", type=int, help="plan id (default: latest plan)")
     execute.add_argument("--snapshot", type=int, help="snapshot for latest-plan lookup")
     execute.add_argument(
         "--apply",
         action="store_true",
-        help="perform authenticated YouTube playlist creates/inserts; omitted means no network writes",
+        help="perform external playlist writes; omitted means no network/browser writes",
     )
     execute.add_argument(
         "--allow-over-quota",
         action="store_true",
-        help="permit --apply even when the persisted plan estimate exceeds its quota limit",
+        help="permit API --apply even when the persisted plan estimate exceeds its quota limit",
     )
     execute.add_argument(
         "--max-writes",
         type=int,
-        help="maximum playlist creates + item inserts this invocation; live duplicate checks do not count",
+        help="maximum playlist creates + item inserts this invocation; duplicate checks do not count",
     )
     _add_oauth_args(execute)
     return parser
@@ -185,27 +186,40 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_execute(args: argparse.Namespace) -> int:
-    client = None
-    if args.apply:
-        client = authenticated_client(
-            client_secrets=args.client_secrets,
-            token_file=args.token,
-        )
-
     with open_catalogue(args.db) as conn:
         run_id = args.run_id if args.run_id is not None else latest_plan_id(conn, args.snapshot)
-        result = execute_api_plan(
-            conn,
-            run_id,
-            client=client,
-            apply=args.apply,
-            allow_over_quota=args.allow_over_quota,
-            max_writes=args.max_writes,
-        )
+        run = conn.execute("SELECT backend FROM playlist_sync_runs WHERE id = ?", (run_id,)).fetchone()
+        if run is None:
+            raise ValueError(f"playlist sync plan {run_id} does not exist")
+        backend = str(run["backend"])
+
+        if backend == "browser":
+            if args.apply:
+                raise RuntimeError(
+                    "browser playlist UI adapter is not implemented yet; this tranche provides "
+                    "the tested executor/checkpoint foundation only"
+                )
+            result = execute_browser_plan(conn, run_id, apply=False, max_writes=args.max_writes)
+        else:
+            client = None
+            if args.apply:
+                client = authenticated_client(
+                    client_secrets=args.client_secrets,
+                    token_file=args.token,
+                )
+            result = execute_api_plan(
+                conn,
+                run_id,
+                client=client,
+                apply=args.apply,
+                allow_over_quota=args.allow_over_quota,
+                max_writes=args.max_writes,
+            )
         payload = plan_payload(conn, run_id)
 
     output = {
         "execution": {
+            "backend": backend,
             "run_id": result.run_id,
             "applied": result.applied,
             "created_playlists": result.created_playlists,
@@ -222,7 +236,8 @@ def _cmd_execute(args: argparse.Namespace) -> int:
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     if not args.apply:
         print(
-            "Dry run only. Re-run with --apply to authorize and perform playlist writes.",
+            "Dry run only. API plans can be applied with --apply; browser-plan writes need the "
+            "Playwright adapter from the next tranche.",
             file=sys.stderr,
         )
         return 0
