@@ -23,6 +23,9 @@ youtube-api = [
 browser = [
     "playwright>=1.60,<2",
 ]
+docs = [
+    "mkdocs>=1.6,<2",
+]
 
 [project.scripts]
 watchlater = "youtube_watchlater_tidy.cli:main"

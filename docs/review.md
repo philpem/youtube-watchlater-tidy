@@ -40,6 +40,7 @@ It displays, where available:
 - playlist position and exact video ID/link;
 - immutable imported title;
 - recovered metadata for unavailable videos;
+- direct archive links labelled **Recovered video** when the recovery backend reports an actual archived video resource;
 - trusted DeArrow alternate title;
 - channel identity;
 - duration, views, upload date and availability;
@@ -47,6 +48,8 @@ It displays, where available:
 - the latest stored LLM suggestion and its provenance.
 
 Current decisions and LLM suggestions are deliberately separate. An LLM suggestion is never shown as though it were already the current decision.
+
+Recovered-video links are taken only from archive resources whose recovery metadata explicitly says they contain video. Metadata-only sources are not presented as playable recovered video links. If several archives contain the video, the report shows all matching services.
 
 ## Filter and sort
 
@@ -154,4 +157,4 @@ watchlater-playlist assign \
 
 Then complete destination synchronization before building the Watch Later removal plan.
 
-See the root [`USER_GUIDE.md`](../USER_GUIDE.md) for the full import → review → plan → apply → verify workflow.
+See the [operator guide](index.md) for the full import → review → plan → apply → verify workflow.
