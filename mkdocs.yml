@@ -1,0 +1,30 @@
+site_name: youtube-watchlater-tidy
+site_description: Import, review, classify, organize, and safely clean up YouTube Watch Later
+site_url: https://philpem.github.io/youtube-watchlater-tidy/
+repo_url: https://github.com/philpem/youtube-watchlater-tidy
+repo_name: philpem/youtube-watchlater-tidy
+edit_uri: edit/master/docs/
+
+theme:
+  name: readthedocs
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+
+nav:
+  - User guide: index.md
+  - Review and decisions:
+      - Manual HTML review: review.md
+      - DeArrow enrichment: dearrow.md
+      - Rich metadata: rich-metadata.md
+      - Captions and transcripts: transcripts.md
+  - LLM:
+      - Provider configuration: llm.md
+      - Classification and history: llm-classification.md
+  - Apply changes to YouTube:
+      - Playlist synchronization: playlist-sync.md
+      - Browser playlist backend: playlist-browser.md
+      - Watch Later removal: watchlater-removal.md

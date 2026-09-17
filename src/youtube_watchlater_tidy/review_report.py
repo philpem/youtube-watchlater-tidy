@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .recovery import archive_links
 from .reports import latest_snapshot_id
 
 REVIEW_FORMAT = "youtube-watchlater-tidy-review-decisions-v1"
@@ -64,6 +65,7 @@ def review_rows(
                m.uploader AS metadata_uploader, m.uploader_id AS metadata_uploader_id,
                m.duration AS metadata_duration, m.view_count AS metadata_view_count,
                m.upload_date AS metadata_upload_date, m.availability AS metadata_availability,
+               a.has_video AS archive_has_video, a.raw_json AS archive_raw_json,
                da.preferred_title AS dearrow_title,
                d.action AS current_action, d.destination_playlist AS current_destination,
                d.source AS current_source, d.reason AS current_reason,
@@ -78,6 +80,14 @@ def review_rows(
                lc.needs_transcript AS llm_needs_transcript
         FROM snapshot_entries AS e
         LEFT JOIN preferred_metadata AS m ON m.video_id = e.video_id
+        LEFT JOIN archive_lookups AS a
+          ON a.id = (
+              SELECT a2.id
+              FROM archive_lookups AS a2
+              WHERE a2.video_id = e.video_id AND a2.status = 'found'
+              ORDER BY a2.id DESC
+              LIMIT 1
+          )
         LEFT JOIN preferred_dearrow AS da ON da.video_id = e.video_id
         LEFT JOIN current_decisions AS d
           ON d.snapshot_id = e.snapshot_id AND d.video_id = e.video_id
@@ -148,6 +158,26 @@ def review_rows(
         )
         availability = row["original_availability"] or row["metadata_availability"]
 
+        recovered_video_links: list[dict[str, Any]] = []
+        if row["archive_has_video"] and row["archive_raw_json"]:
+            try:
+                archive_raw = json.loads(row["archive_raw_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                archive_raw = {}
+            if isinstance(archive_raw, dict):
+                for link in archive_links(archive_raw):
+                    if "video" not in link.contains.casefold():
+                        continue
+                    recovered_video_links.append(
+                        {
+                            "service": link.service,
+                            "title": link.title,
+                            "url": link.url,
+                            "note": link.note,
+                            "maybe_paywalled": link.maybe_paywalled,
+                        }
+                    )
+
         current = None
         if row["current_action"] not in (None, "clear"):
             current = {
@@ -184,6 +214,7 @@ def review_rows(
                 "original_title": original_title,
                 "recovered_title": recovered_title,
                 "metadata_source": row["metadata_source"],
+                "recovered_video_links": recovered_video_links,
                 "dearrow_title": row["dearrow_title"],
                 "channel": channel,
                 "channel_id": channel_id,
@@ -272,7 +303,7 @@ function populateTopics() {{
 }}
 function matches(r) {{
   const q=searchEl.value.trim().toLowerCase();
-  if(q && ![r.video_id,r.original_title,r.recovered_title,r.dearrow_title,r.channel,r.llm?.topic,r.llm?.reason].filter(Boolean).join(' ').toLowerCase().includes(q)) return false;
+  if(q && ![r.video_id,r.original_title,r.recovered_title,r.dearrow_title,r.channel,...(r.recovered_video_links||[]).flatMap(x=>[x.service,x.title]),r.llm?.topic,r.llm?.reason].filter(Boolean).join(' ').toLowerCase().includes(q)) return false;
   const currentAction=r.current_decision?.action ?? 'unresolved';
   if(currentFilterEl.value && currentAction!==currentFilterEl.value) return false;
   const llmAction=r.llm?.action ?? 'none';
@@ -297,10 +328,12 @@ function rowHtml(r) {{
   const s=state.get(r.video_id) || {{action:'',note:''}};
   const thumb=r.thumbnail?`<a href="${{esc(r.url)}}" target="_blank"><img class="thumb" loading="lazy" referrerpolicy="no-referrer" src="${{esc(r.thumbnail)}}"></a>`:'';
   const recovered=r.recovered_title?`<div><b>Recovered:</b> ${{esc(r.recovered_title)}} <span class="small">(${{esc(r.metadata_source)}})</span></div>`:'';
+  const recoveredVideos=(r.recovered_video_links||[]).map(x=>`<a href="${{esc(x.url)}}" target="_blank" rel="noopener noreferrer">${{esc(x.service)}}${{x.title&&x.title!=='archived resource'?' — '+esc(x.title):''}}</a>${{x.maybe_paywalled?' <span class="small">(may require access)</span>':''}}`).join(' · ');
+  const recoveredVideo=recoveredVideos?`<div><b>Recovered video:</b> ${{recoveredVideos}}</div>`:'';
   const dearrow=r.dearrow_title?`<div><b>DeArrow:</b> ${{esc(r.dearrow_title)}}</div>`:'';
   const cur=current?`<div class="action">${{esc(current.action)}}${{current.destination_playlist?' → '+esc(current.destination_playlist):''}}</div><div class="small">${{esc(current.source)}}${{current.reason?' — '+esc(current.reason):''}}</div>`:'<span class="small">unresolved</span>';
   const lm=llm?`<div class="action">${{esc(llm.action)}} · ${{Math.round((llm.confidence??0)*100)}}%</div><div>${{esc(llm.topic)}} · ${{esc(llm.content_type)}} · ${{esc(llm.timeliness)}}</div><div class="reason">${{esc(llm.reason)}}</div><div class="small">run ${{llm.run_id}}${{llm.existing_playlist?' → '+esc(llm.existing_playlist):llm.new_queue_proposal?' → '+esc(llm.new_queue_proposal):''}}${{llm.needs_description?' · needs description':''}}${{llm.needs_transcript?' · needs transcript':''}}</div>`:'<span class="small">no stored LLM suggestion</span>';
-  return `<tr data-id="${{esc(r.video_id)}}"><td>${{r.position}}</td><td>${{thumb}}<div><a href="${{esc(r.url)}}" target="_blank">${{esc(r.video_id)}}</a></div></td><td class="title"><b>${{esc(r.original_title)}}</b>${{recovered}}${{dearrow}}<div>${{esc(r.channel||'-')}}</div><div class="small">${{dur(r.duration)}} · ${{num(r.views)}} views · ${{esc(r.upload_date||'-')}} · ${{esc(r.availability||'-')}}</div></td><td>${{cur}}</td><td>${{lm}}</td><td><select class="override-action"><option value="">no override</option>${{['keep','review','archive','delete'].map(a=>`<option value="${{a}}" ${{s.action===a?'selected':''}}>${{a}}</option>`).join('')}}</select><br><input class="override-note" placeholder="optional note" value="${{esc(s.note)}}"></td></tr>`;
+  return `<tr data-id="${{esc(r.video_id)}}"><td>${{r.position}}</td><td>${{thumb}}<div><a href="${{esc(r.url)}}" target="_blank">${{esc(r.video_id)}}</a></div></td><td class="title"><b>${{esc(r.original_title)}}</b>${{recovered}}${{recoveredVideo}}${{dearrow}}<div>${{esc(r.channel||'-')}}</div><div class="small">${{dur(r.duration)}} · ${{num(r.views)}} views · ${{esc(r.upload_date||'-')}} · ${{esc(r.availability||'-')}}</div></td><td>${{cur}}</td><td>${{lm}}</td><td><select class="override-action"><option value="">no override</option>${{['keep','review','archive','delete'].map(a=>`<option value="${{a}}" ${{s.action===a?'selected':''}}>${{a}}</option>`).join('')}}</select><br><input class="override-note" placeholder="optional note" value="${{esc(s.note)}}"></td></tr>`;
 }}
 function render() {{
   const visible=sorted(DATA.rows.filter(matches));

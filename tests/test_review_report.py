@@ -83,6 +83,43 @@ class ReviewReportTests(unittest.TestCase):
                           'Descriptive A', '[]', NULL, '{}')
                 """
             )
+            archive_raw = {
+                "keys": [
+                    {
+                        "name": "Filmot",
+                        "available": [
+                            {
+                                "url": "https://example.invalid/metadata/video00000A",
+                                "contains": "metadata",
+                                "title": "Metadata",
+                            }
+                        ],
+                    },
+                    {
+                        "name": "GhostArchive",
+                        "available": [
+                            {
+                                "url": "https://example.invalid/archive/video00000A",
+                                "contains": ["video", "metadata"],
+                                "title": "Archived video",
+                            }
+                        ],
+                    },
+                ],
+                "verdict": {"video": True, "metaonly": True, "comments": False},
+            }
+            conn.execute(
+                """
+                INSERT INTO archive_lookups (
+                    video_id, backend, looked_up_at, status,
+                    has_video, has_metadata, has_comments,
+                    human_verdict, source_url, raw_json
+                ) VALUES (?, 'findyoutubevideo-v5', '2026-09-15T12:01:00+00:00',
+                          'found', 1, 1, 0, 'Video found',
+                          'https://findyoutubevideo.thetechrobo.ca/?q=video00000A', ?)
+                """,
+                ("video00000A", json.dumps(archive_raw)),
+            )
             selection = select_title(conn, contains="Original B", snapshot_id=self.snapshot)
             apply_selection_action(
                 conn,
@@ -170,6 +207,9 @@ class ReviewReportTests(unittest.TestCase):
         self.assertEqual(first["llm"]["run_id"], self.run_id)
         self.assertEqual(first["llm"]["confidence"], 0.65)
         self.assertEqual(first["thumbnail"], "https://example.invalid/a.jpg")
+        self.assertEqual(len(first["recovered_video_links"]), 1)
+        self.assertEqual(first["recovered_video_links"][0]["service"], "GhostArchive")
+        self.assertEqual(first["recovered_video_links"][0]["url"], "https://example.invalid/archive/video00000A")
         self.assertEqual(second["current_decision"]["action"], "archive")
         self.assertEqual(second["current_decision"]["reason"], "manual archive")
         self.assertEqual(second["llm"]["action"], "review")
@@ -184,6 +224,9 @@ class ReviewReportTests(unittest.TestCase):
         self.assertIn(REVIEW_FORMAT, page)
         self.assertIn("Export explicit overrides", page)
         self.assertIn("human-review-report", page)
+        self.assertIn("Recovered video:", page)
+        self.assertIn("https://example.invalid/archive/video00000A", page)
+        self.assertNotIn("https://example.invalid/metadata/video00000A", page)
         self.assertIn("JSON.stringify(payload,null,2)+\'\\n\'", page)
         self.assertNotIn("JSON.stringify(payload,null,2)+\'" + chr(10) + "\'", page)
 

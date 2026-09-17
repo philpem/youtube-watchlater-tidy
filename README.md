@@ -2,6 +2,17 @@
 
 Tools for exporting, triaging, classifying, and cleaning up a large YouTube Watch Later playlist.
 
+## Documentation
+
+Start with the [operator guide](docs/index.md). It covers import, the different review/triage workflows, how local decisions are recorded, and how to dry-run/apply those decisions on YouTube.
+
+For a local wiki-style documentation site:
+
+```bash
+pip install -e '.[docs]'
+mkdocs serve
+```
+
 ## Export Watch Later metadata
 
 `yt-dlp` can export the playlist metadata using your logged-in browser session without downloading the videos themselves:

@@ -31,7 +31,7 @@ Or import the versioned JSON inventory manually:
 watchlater-playlist inventory import playlist-inventory.json
 ```
 
-The format is `youtube-watchlater-tidy-playlist-inventory-v1`; see [`examples/playlist-inventory.example.json`](../examples/playlist-inventory.example.json).
+The format is `youtube-watchlater-tidy-playlist-inventory-v1`; see [`examples/playlist-inventory.example.json`](https://github.com/philpem/youtube-watchlater-tidy/blob/master/examples/playlist-inventory.example.json).
 
 Duplicate playlist IDs and duplicate video IDs inside one playlist are rejected. Duplicate titles are retained because YouTube permits them; planning refuses an ambiguous title rather than guessing.
 
