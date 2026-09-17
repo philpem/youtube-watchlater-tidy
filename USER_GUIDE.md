@@ -7,50 +7,31 @@ The project is deliberately conservative: imported Watch Later snapshots are evi
 human/rule decisions outrank LLM suggestions, and YouTube-writing commands require explicit
 execution flags. Keep backups of both `watch-later.json` and `watchlater.sqlite3`.
 
-## 1. Workflow at a glance
+## How the workflow fits together
 
-```text
-Watch Later export
-      |
-      v
-immutable SQLite snapshot
-      |
-      +--> metadata repair / archive recovery
-      +--> creator/title/keyword triage + saved rules
-      +--> DeArrow alternate titles
-      |
-      v
-LLM first pass over unresolved videos
-      |
-      +--> descriptions -> description refinement
-      +--> captions     -> transcript refinement
-      |
-      v
-self-contained HTML human review
-      |
-      v
-current reviewed/rule decisions
-      |
-      +--> move -> one or more destination playlists -> API / Playwright execution --+
-      |                                                                         |
-      +--> delete/archive -------------------------------------------------------+
-                                                                                |
-                                                                                v
-                                                                   Watch Later removal plan
-                                                                                |
-                                                                                v
-                                                             explicit Playwright execution
-```
+The project separates **local decisions** from **changes on YouTube**:
 
-Important invariants:
+1. **Export/import** Watch Later into SQLite. This creates an immutable snapshot and does not change YouTube.
+2. **Review/triage locally** using creator/title cohorts, saved rules, the HTML review page, or optional LLM suggestions.
+3. **Record current decisions** (`keep`, `review`, `archive`, `delete`, or `move`). These are still local only.
+4. **Plan external changes** from those current decisions.
+5. **Dry-run** the playlist/removal plans.
+6. **Apply** the plans explicitly to YouTube.
+7. **Re-export and import again** to verify the resulting YouTube state as a new snapshot.
 
-1. Enrichment never rewrites imported snapshot fields.
-2. LLM output is advisory evidence, not a `decision_event`.
-3. Playlist and Watch Later execution bind to exact decision-event IDs; changed decisions make old plans stale.
-4. A `move` is never removed from Watch Later until **every destination on that exact move decision** is confirmed inserted or live-present.
-5. API/browser execution is dry-run by default.
+The local actions map to YouTube like this:
 
-## 2. Install
+| Action | Local meaning | YouTube effect when plans are applied |
+| --- | --- | --- |
+| `keep` | Keep in Watch Later | None |
+| `review` | Explicitly defer for later review | None |
+| `archive` | Useful reference, but no longer wanted in Watch Later | Remove from Watch Later |
+| `delete` | No longer wanted | Remove from Watch Later |
+| `move` | Put in one or more normal playlists first | Add/confirm all destinations, then remove from Watch Later |
+
+A `move` is deliberately gated: Watch Later removal is not allowed until every requested destination on that exact move decision has been confirmed by an executor.
+
+## 1. Install
 
 Core install:
 
@@ -86,7 +67,7 @@ Important commands:
 
 Most commands default to `watchlater.sqlite3`.
 
-## 3. Export and import Watch Later
+## 2. Export and import Watch Later
 
 ```bash
 yt-dlp \
@@ -100,9 +81,20 @@ watchlater import watch-later.json
 watchlater snapshots
 ```
 
-The importer preserves exact playlist position and hashes the export, so importing the same file again is idempotent. Later exports become separate snapshots.
+The importer preserves exact video IDs and playlist positions and stores the export as an immutable snapshot. The input file is hashed, so importing the exact same file again is idempotent.
 
-## 4. Inspect and repair metadata
+Import is **read-only with respect to YouTube**: it does not remove videos, create playlists, or turn automated suggestions into decisions.
+
+Keep the original `watch-later.json` as evidence. After applying changes to YouTube, make another yt-dlp export and import it too:
+
+```bash
+watchlater import watch-later-after.json
+watchlater snapshots
+```
+
+That creates a second snapshot instead of rewriting the first, giving you an auditable before/after history.
+
+## 3. Inspect and repair metadata
 
 ```bash
 watchlater creators --remaining
@@ -127,7 +119,7 @@ watchlater videos --unavailable --unrecovered
 
 Cached archive results are skipped before `--limit`, so repeated runs advance through the uncached remainder. Prefer explicit targets for `--refresh`.
 
-## 5. Cheap/manual triage first
+## 4. Cheap/manual triage first
 
 ```bash
 watchlater creators --remaining
@@ -183,7 +175,7 @@ watchlater rules apply
 
 Rules only act on unresolved videos and never overwrite existing human decisions.
 
-## 6. DeArrow and LLM classification
+## 5. DeArrow and LLM classification
 
 ```bash
 watchlater-dearrow enrich --all --remaining
@@ -203,7 +195,7 @@ watchlater-llm --config watchlater.toml classify \
 
 LLM results are append-only advisory evidence and are cached by provider/prompt/evidence.
 
-## 7. Description and transcript escalation
+## 6. Description and transcript escalation
 
 For a run that requested descriptions:
 
@@ -223,22 +215,64 @@ watchlater-llm-transcript --config watchlater.toml \
 
 Existing manual captions are preferred; automatic captions are fallback. Audio is not transcribed by default.
 
-## 8. Human review
+## 7. Human review
+
+Build and open the self-contained review page:
 
 ```bash
 watchlater-review build review.html
+firefox review.html
 ```
 
-Open the self-contained HTML locally, export explicit overrides, validate, then import:
+The page shows catalogue metadata, the **current decision**, and the latest stored **LLM suggestion** in separate columns.
+
+### Manual overrides
+
+The **Human override** selector currently supports:
+
+- `keep`
+- `review`
+- `archive`
+- `delete`
+
+plus an optional note.
+
+`no override` means: leave the current catalogue decision unchanged. The page only keeps your choices in browser memory until you click **Export explicit overrides**. Only rows where you selected an override are written to the exported JSON file.
+
+The downloaded file is normally named something like:
+
+```text
+watchlater-review-1.json
+```
+
+Validate it first:
 
 ```bash
 watchlater-review import watchlater-review-1.json --dry-run
+```
+
+Then import the decisions into SQLite:
+
+```bash
 watchlater-review import watchlater-review-1.json
 ```
 
-Imported overrides become append-only human decision events.
+Imported rows become append-only human decisions with `source = human-review-report`; the optional note becomes the decision reason. This still does **not** change YouTube.
 
-## 9. Plan and execute destination playlist moves
+Regenerate the report if you want to confirm the imported decisions:
+
+```bash
+watchlater-review build review-after.html
+firefox review-after.html
+```
+
+The HTML report does not currently create `move` decisions because a move also needs destination playlist information. Record those through the CLI selection/playlist workflow instead.
+
+## 8. Plan and execute destination playlist moves
+
+**From this point onward, commands can write to YouTube.** `keep` and `review` need no external action. `archive` and `delete` go to the Watch Later removal workflow. `move` must complete destination playlist synchronization first.
+
+This is the first phase that can write to YouTube. `keep`/`review` need no external action; `archive`/`delete` skip straight to the Watch Later removal phase below. `move` must complete destination playlist synchronization first.
 
 Refresh/import normal-playlist inventory first:
 
@@ -288,7 +322,7 @@ Both executors check live membership before insertion, checkpoint every destinat
 
 See [`docs/playlist-sync.md`](docs/playlist-sync.md) and [`docs/playlist-browser.md`](docs/playlist-browser.md).
 
-## 10. Build a Watch Later removal plan
+## 9. Build a Watch Later removal plan
 
 ```bash
 watchlater-remove plan --output removal-plan.json
@@ -304,7 +338,7 @@ Planner-time inventory-only membership is never enough. If even one destination 
 
 Old removal plans become stale when the current decision event changes.
 
-## 11. Set up the shared Playwright profile
+## 10. Set up the shared Playwright profile
 
 Destination-playlist and Watch Later browser executors intentionally share one dedicated automation profile:
 
@@ -322,7 +356,7 @@ Default profile:
 
 It is ignored by Git. Sign in manually, then return to the terminal and press Enter to close it.
 
-## 12. Dry-run selective Watch Later execution
+## 11. Dry-run selective Watch Later execution
 
 ```bash
 watchlater-remove execute --run-id REMOVAL_PLAN_ID
@@ -330,7 +364,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID
 
 Without `--apply`, there is no browser creation and no checkpoint mutation.
 
-## 13. Apply selective Watch Later removal
+## 12. Apply selective Watch Later removal
 
 Real removal requires both explicit flags:
 
@@ -359,7 +393,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
 
 Headed mode is the default. See [`docs/watchlater-removal.md`](docs/watchlater-removal.md).
 
-## 14. Recommended end-to-end sequence
+## 13. Recommended end-to-end sequence
 
 ```bash
 # export/import
@@ -400,14 +434,14 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
     --apply --confirm-remove --max-deletes 3
 ```
 
-## 15. Current limitations
+## 14. Current limitations
 
 - Saved rules and LLM destination proposals currently express one destination; multiple destinations are an explicit human assignment through `watchlater-playlist assign`.
 - YouTube UI selectors/text can change without notice; browser execution deliberately fails rather than guessing when identity/menu checks do not match.
 - Browser playlist creation relies on YouTube's normal private default for private playlists; non-private creation is attempted only when a recognizable privacy control is present.
 - Transcript escalation uses existing captions only; audio transcription is not performed by default.
 
-## 16. Detailed documentation
+## 15. Detailed documentation
 
 - [`docs/dearrow.md`](docs/dearrow.md) — alternate-title trust/privacy.
 - [`docs/llm.md`](docs/llm.md) — LLM provider configuration.

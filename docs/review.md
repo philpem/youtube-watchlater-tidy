@@ -1,102 +1,157 @@
 # Human review report
 
-`watchlater-review` provides a self-contained local HTML review workflow for inspecting and overriding catalogue decisions without depending on YouTube's playlist UI or running a web service.
+`watchlater-review` provides a self-contained HTML workflow for making **local human decisions** without changing YouTube directly.
 
-The report is deliberately read-only with respect to SQLite. Human overrides are made in the browser, exported as a versioned JSON file, then explicitly imported with the CLI.
+The complete workflow is:
+
+```text
+build HTML
+   ↓
+review rows in a browser
+   ↓
+choose explicit overrides
+   ↓
+export JSON
+   ↓
+dry-run import
+   ↓
+import into SQLite
+   ↓
+later plan/apply YouTube changes separately
+```
 
 ## Build a report
 
 ```bash
 watchlater-review build review.html
+firefox review.html
 ```
 
-For an older snapshot:
+For another snapshot:
 
 ```bash
 watchlater-review build review.html --snapshot 2
 ```
 
-The resulting single HTML file embeds the catalogue rows and all filtering/sorting JavaScript. Thumbnail images remain ordinary YouTube/external image URLs rather than being copied into the report.
+The HTML is self-contained apart from ordinary external thumbnail URLs. It embeds the catalogue data and filtering/sorting JavaScript.
 
-The report shows, where available:
+It displays, where available:
 
-- playlist position and video ID/link;
-- thumbnail;
-- immutable imported YouTube title;
-- recovered archive title/provenance for unavailable videos;
+- playlist position and exact video ID/link;
+- immutable imported title;
+- recovered metadata for unavailable videos;
 - trusted DeArrow alternate title;
-- channel/channel ID;
+- channel identity;
 - duration, views, upload date and availability;
-- current human/rule decision and reason;
-- latest stored LLM suggestion, run ID, topic/content type/timeliness, confidence/reason, destination proposal and escalation flags.
+- the current human/rule decision;
+- the latest stored LLM suggestion and its provenance.
 
-Current catalogue decisions and LLM suggestions are displayed in separate columns. A stored LLM suggestion is never presented as though it were the current human decision.
+Current decisions and LLM suggestions are deliberately separate. An LLM suggestion is never shown as though it were already the current decision.
 
 ## Filter and sort
 
-The page can filter by free-text search, current action, LLM action, topic and maximum LLM confidence. Sorting includes playlist position, confidence and view count.
+The page supports free-text search, current-action filtering, LLM-action filtering, topic filtering, maximum LLM confidence, and position/confidence/view sorting.
 
-The maximum-confidence filter is useful for concentrating review on uncertain LLM results, e.g. confidence <= 0.6.
+The confidence filter is useful for focusing on uncertain LLM results.
 
-## Record overrides in the page
+## Human overrides
 
-Each row has a human-override selector for:
+The rightmost **Human override** column currently offers:
 
 - `keep`
 - `review`
 - `archive`
 - `delete`
 
-and an optional note field.
+plus an optional note.
 
-Leaving the selector at `no override` means the row is omitted from the exported decision file. The report therefore exports only choices the reviewer explicitly changed/confirmed during that review session.
+### What the choices mean
 
-`move` is intentionally not offered as a report override in this first version; playlist destinations need additional execution/synchronisation context from #10. Existing `move` decisions and LLM move proposals are still displayed.
+- **no override** — do not change the current catalogue decision;
+- **keep** — explicitly keep the video in Watch Later;
+- **review** — explicitly defer it for further manual review;
+- **archive** — retain it as useful local/reference material, but later remove it from Watch Later;
+- **delete** — no longer wanted; later remove it from Watch Later.
 
-## Export decisions
+The page keeps choices only in browser memory until they are exported. Only rows with an explicit override are included in the exported JSON.
 
-Press **Export explicit overrides** in the HTML page. The browser downloads JSON using this format marker:
+## Export the overrides
+
+Click **Export explicit overrides**. The browser downloads a file such as:
+
+```text
+watchlater-review-1.json
+```
+
+using format:
 
 ```text
 youtube-watchlater-tidy-review-decisions-v1
 ```
 
-The payload includes the snapshot ID and a list of exact video IDs/actions/notes. It does not contain playlist-order assumptions.
+The file contains exact video IDs, actions and optional notes. It does not use playlist positions as the identity of a video.
 
-## Validate before import
+## Dry-run the import
 
-Always inspect with dry-run first:
-
-```bash
-watchlater-review import watchlater-review-2.json --dry-run
-```
-
-The importer validates:
-
-- the format marker;
-- integer snapshot ID;
-- allowed action names;
-- unique non-empty video IDs;
-- that every video ID belongs to the specified snapshot.
-
-Any missing/foreign video ID rejects the import before decisions are written.
-
-## Apply the human overrides
+Always validate first:
 
 ```bash
-watchlater-review import watchlater-review-2.json
+watchlater-review import watchlater-review-1.json --dry-run
 ```
 
-Each change creates a normal append-only `decision_events` row with:
+This checks the format marker, snapshot ID, allowed actions, duplicate video IDs, and that every video belongs to the selected snapshot. No decision rows are written during the dry-run.
+
+## Import into the local catalogue
+
+```bash
+watchlater-review import watchlater-review-1.json
+```
+
+Each changed row creates an append-only decision event with:
 
 ```text
 source = human-review-report
 ```
 
-and the report note as the decision reason. Existing decisions are superseded through normal catalogue history rather than deleted.
+The optional note becomes the reason. Existing decisions are superseded through normal decision history rather than erased. Re-importing the same file is idempotent while the identical imported decision is still current.
 
-Re-importing an identical file is idempotent while the same imported human-review decision is still current: an identical action/reason is reported as unchanged and no duplicate event is appended.
+## Verify the import
 
-## What this does not do
+Regenerate the report:
 
-The review report does not mutate YouTube. In particular, choosing `delete` or `archive` only creates a local reviewed decision. Selective Watch Later execution remains #7, and destination-playlist execution remains #10.
+```bash
+watchlater-review build review-after.html
+firefox review-after.html
+```
+
+The imported choices should now appear in the **Current decision** column with `human-review-report` as their source.
+
+## What happens next
+
+Importing review overrides still does **not** change YouTube.
+
+The external action depends on the decision:
+
+- `keep` / `review` — no external operation;
+- `archive` / `delete` — become candidates for `watchlater-remove plan`;
+- `move` — is currently recorded outside the HTML report because destinations are required.
+
+For moves, use normal CLI selection/assignment:
+
+```bash
+watchlater select creator CHANNEL_ID --remaining
+watchlater selection action move --playlist 'Queue - Electronics'
+```
+
+or for several destinations:
+
+```bash
+watchlater-playlist assign \
+    --selection 12 \
+    --playlist 'Queue - Electronics' \
+    --playlist 'Reference - Repairs'
+```
+
+Then complete destination synchronization before building the Watch Later removal plan.
+
+See the root [`USER_GUIDE.md`](../USER_GUIDE.md) for the full import → review → plan → apply → verify workflow.
