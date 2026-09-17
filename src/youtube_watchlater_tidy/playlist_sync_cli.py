@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .db import open_catalogue
 from .playlist_browser import execute_browser_plan
+from .playlist_playwright import PlaywrightPlaylistClient
 from .playlist_sync import (
     DEFAULT_API_QUOTA_LIMIT,
     DEFAULT_PLAYLIST_CREATE_COST,
@@ -18,6 +19,7 @@ from .playlist_sync import (
     load_inventory_file,
     plan_payload,
 )
+from .watchlater_browser import DEFAULT_BROWSER_PROFILE
 from .youtube_api import (
     DEFAULT_CLIENT_SECRETS,
     DEFAULT_TOKEN_FILE,
@@ -42,6 +44,29 @@ def _add_oauth_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_TOKEN_FILE,
         help=f"OAuth token cache (default: {DEFAULT_TOKEN_FILE})",
     )
+
+
+def _add_browser_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--user-data-dir",
+        type=Path,
+        default=DEFAULT_BROWSER_PROFILE,
+        help=f"dedicated persistent Playwright profile (default: {DEFAULT_BROWSER_PROFILE})",
+    )
+    parser.add_argument("--headless", action="store_true", help="run browser headless after validating a headed setup")
+    parser.add_argument("--browser-channel", help="optional Playwright browser channel such as chrome")
+    parser.add_argument("--interval", type=float, default=2.0, help="seconds between confirmed browser writes")
+    parser.add_argument("--retries", type=int, default=1, help="browser/UI retries per operation")
+    parser.add_argument("--backoff", type=float, default=2.0, help="initial exponential retry backoff in seconds")
+    parser.add_argument("--max-scrolls", type=int, default=250)
+    parser.add_argument("--scroll-pause", type=float, default=0.7)
+    parser.add_argument("--create-label", default="Create")
+    parser.add_argument("--new-playlist-label", default="New playlist")
+    parser.add_argument("--add-label", default="Add")
+    parser.add_argument("--save-to-playlist-label", default="Save to playlist")
+    parser.add_argument("--studio-save-label", default="Save")
+    parser.add_argument("--visibility-label", default="Visibility")
+    parser.add_argument("--search-label", default="Search")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -113,6 +138,7 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum playlist creates + item inserts this invocation; duplicate checks do not count",
     )
     _add_oauth_args(execute)
+    _add_browser_args(execute)
     return parser
 
 
@@ -186,62 +212,91 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_execute(args: argparse.Namespace) -> int:
-    with open_catalogue(args.db) as conn:
-        run_id = args.run_id if args.run_id is not None else latest_plan_id(conn, args.snapshot)
-        run = conn.execute("SELECT backend FROM playlist_sync_runs WHERE id = ?", (run_id,)).fetchone()
-        if run is None:
-            raise ValueError(f"playlist sync plan {run_id} does not exist")
-        backend = str(run["backend"])
+    browser_client = None
+    try:
+        with open_catalogue(args.db) as conn:
+            run_id = args.run_id if args.run_id is not None else latest_plan_id(conn, args.snapshot)
+            run = conn.execute("SELECT backend FROM playlist_sync_runs WHERE id = ?", (run_id,)).fetchone()
+            if run is None:
+                raise ValueError(f"playlist sync plan {run_id} does not exist")
+            backend = str(run["backend"])
 
-        if backend == "browser":
-            if args.apply:
-                raise RuntimeError(
-                    "browser playlist UI adapter is not implemented yet; this tranche provides "
-                    "the tested executor/checkpoint foundation only"
+            if backend == "browser":
+                if args.apply:
+                    preflight = plan_payload(conn, run_id)
+                    stale = int(preflight["stale_item_count"])
+                    if stale:
+                        raise ValueError(
+                            f"playlist sync plan {run_id} contains {stale} stale item(s); create a fresh plan before applying"
+                        )
+                    browser_client = PlaywrightPlaylistClient(
+                        user_data_dir=args.user_data_dir,
+                        headless=args.headless,
+                        channel=args.browser_channel,
+                        max_scrolls=args.max_scrolls,
+                        scroll_pause=args.scroll_pause,
+                        create_label=args.create_label,
+                        new_playlist_label=args.new_playlist_label,
+                        add_label=args.add_label,
+                        save_to_playlist_label=args.save_to_playlist_label,
+                        studio_save_label=args.studio_save_label,
+                        visibility_label=args.visibility_label,
+                        search_label=args.search_label,
+                    )
+                result = execute_browser_plan(
+                    conn,
+                    run_id,
+                    client=browser_client,
+                    apply=args.apply,
+                    max_writes=args.max_writes,
+                    interval=args.interval,
+                    retries=args.retries,
+                    backoff=args.backoff,
                 )
-            result = execute_browser_plan(conn, run_id, apply=False, max_writes=args.max_writes)
-        else:
-            client = None
-            if args.apply:
-                client = authenticated_client(
-                    client_secrets=args.client_secrets,
-                    token_file=args.token,
+            else:
+                client = None
+                if args.apply:
+                    client = authenticated_client(
+                        client_secrets=args.client_secrets,
+                        token_file=args.token,
+                    )
+                result = execute_api_plan(
+                    conn,
+                    run_id,
+                    client=client,
+                    apply=args.apply,
+                    allow_over_quota=args.allow_over_quota,
+                    max_writes=args.max_writes,
                 )
-            result = execute_api_plan(
-                conn,
-                run_id,
-                client=client,
-                apply=args.apply,
-                allow_over_quota=args.allow_over_quota,
-                max_writes=args.max_writes,
+            payload = plan_payload(conn, run_id)
+
+        output = {
+            "execution": {
+                "backend": backend,
+                "run_id": result.run_id,
+                "applied": result.applied,
+                "created_playlists": result.created_playlists,
+                "inserted": result.inserted,
+                "already_present_this_run": result.already_present,
+                "failed_this_run": result.failed,
+                "stale_this_run": result.stale,
+                "remaining": result.remaining,
+                "writes_this_run": result.writes,
+                "run_status": result.run_status,
+            },
+            "plan": payload,
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        if not args.apply:
+            print(
+                "Dry run only. Re-run with --apply to authorize the persisted plan through its selected backend.",
+                file=sys.stderr,
             )
-        payload = plan_payload(conn, run_id)
-
-    output = {
-        "execution": {
-            "backend": backend,
-            "run_id": result.run_id,
-            "applied": result.applied,
-            "created_playlists": result.created_playlists,
-            "inserted": result.inserted,
-            "already_present_this_run": result.already_present,
-            "failed_this_run": result.failed,
-            "stale_this_run": result.stale,
-            "remaining": result.remaining,
-            "writes_this_run": result.writes,
-            "run_status": result.run_status,
-        },
-        "plan": payload,
-    }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    if not args.apply:
-        print(
-            "Dry run only. API plans can be applied with --apply; browser-plan writes need the "
-            "Playwright adapter from the next tranche.",
-            file=sys.stderr,
-        )
-        return 0
-    return 0 if result.failed == 0 and result.stale == 0 else 1
+            return 0
+        return 0 if result.failed == 0 and result.stale == 0 else 1
+    finally:
+        if browser_client is not None:
+            browser_client.close()
 
 
 def main(argv: list[str] | None = None) -> int:
