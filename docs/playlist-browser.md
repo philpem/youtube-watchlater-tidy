@@ -1,79 +1,138 @@
-# Browser destination-playlist executor foundation
+# Browser destination-playlist execution
 
-This is the execution-neutral browser foundation for issue #10. It deliberately contains **no Playwright selectors yet** and cannot perform real browser writes from the CLI in this tranche.
+The browser backend is the quota-free execution path for large destination-playlist moves. It consumes the same persisted `playlist_sync_*` plans/checkpoints as the YouTube Data API backend, so classification/planning state does not depend on the UI mechanism.
 
-The purpose is to make the safety/checkpoint semantics independently testable before coupling them to YouTube's web UI.
+## Install and sign in
 
-## Planning
-
-Create the same local move plan using the browser backend:
+Install the optional Playwright support and Chromium:
 
 ```bash
+pip install -e '.[browser]'
+playwright install chromium
+```
+
+Use the same dedicated browser profile as selective Watch Later removal:
+
+```bash
+watchlater-playlist browser-login
+```
+
+The default profile is:
+
+```text
+.watchlater-playwright-profile/
+```
+
+It is ignored by Git. Sign in manually in the opened browser, then return to the terminal and press Enter.
+
+Do not point this at your normal interactive Chrome/Chromium profile; use the dedicated automation profile.
+
+## Plan browser-backed moves
+
+Refresh/import normal-playlist inventory first, then create a browser plan:
+
+```bash
+watchlater-playlist inventory refresh
 watchlater-playlist plan --backend browser
 watchlater-playlist show
 ```
 
-The planner uses the same current `move` decisions and destination inventory as the API backend. Browser plans report zero **API** quota cost.
+Browser plans use the same current `move` decisions and exact decision-event IDs as API plans, but their API quota estimate is zero.
 
-## Dry-run execution
-
-The normal `execute` command now understands browser plans:
+## Dry-run first
 
 ```bash
 watchlater-playlist execute --run-id PLAN_ID
 ```
 
-This performs no browser/network access and no checkpoint mutation. `--apply` deliberately refuses until the Playwright adapter is added in the next tranche.
+Without `--apply` there is no browser creation and no checkpoint mutation.
 
-## Executor contract
+## Apply a browser plan
 
-`playlist_browser.execute_browser_plan()` consumes a `PlaylistBrowserClient` with four operations:
+Start with a small write cap:
 
-- list live destination playlists;
-- find an exact video ID in an exact destination playlist;
-- create one destination playlist;
-- insert one exact video ID into one exact destination playlist.
-
-The later Playwright adapter implements that protocol. Unit tests use a fake browser implementation now.
-
-## Safety semantics already implemented
-
-The browser executor foundation:
-
-1. refuses plans not created with `backend=browser`;
-2. refuses stale decision-event IDs before writes;
-3. rechecks the current decision immediately before the live membership/write step;
-4. resolves `create_planned` destination names against the live account before creating anything;
-5. refuses ambiguous live destination titles;
-6. refuses to silently recreate a destination whose stable planned playlist ID disappeared;
-7. rechecks destination membership immediately before insertion;
-8. treats a live duplicate as `already_present` success;
-9. revalidates planner-time `already_present` rows rather than trusting old inventory;
-10. checkpoints playlist creation, insertion, duplicate membership and failure in the existing `playlist_sync_*` tables;
-11. supports retry/backoff, pacing and a maximum write count;
-12. resumes without repeating confirmed work.
-
-Successful browser evidence also refreshes the corresponding rows in the local playlist inventory.
-
-## Write cap and resume
-
-The generic executor supports the same conservative concept as the API backend:
-
-```text
-max_writes = playlist creations + video insertions
+```bash
+watchlater-playlist execute --run-id PLAN_ID \
+    --apply --max-writes 3
 ```
 
-Read-only live checks do not consume the cap. A capped run remains `partial` and can be resumed without recreating a successful destination or reinserting a confirmed video.
+Headed mode is the default so UI actions remain visible. `--headless` is available only after validating your setup.
 
-## What remains for the next tranche
+The executor also accepts pacing/retry controls:
 
-The next tranche adds the real Playwright implementation of `PlaylistBrowserClient`, including:
+```bash
+watchlater-playlist execute --run-id PLAN_ID \
+    --apply --max-writes 5 \
+    --interval 3 --retries 2 --backoff 3
+```
 
-- a dedicated authenticated browser profile;
-- exact playlist identity resolution;
-- exact video identity verification;
-- UI actions for playlist creation and insertion;
-- headed-by-default execution;
-- configurable localization/selectors and diagnostic screenshots/HTML on UI failures.
+## Identity and safety checks
 
-Until that lands, `watchlater-playlist execute --run-id BROWSER_PLAN --apply` intentionally refuses.
+The Playwright client deliberately treats YouTube's DOM as untrusted/brittle UI state.
+
+It:
+
+1. discovers playlist IDs from exact `/playlist?list=...` URLs on YouTube's playlist page;
+2. excludes special Watch Later/Liked Videos IDs from normal destination discovery;
+3. refuses conflicting/ambiguous playlist identity/title information;
+4. verifies a known destination by stable playlist ID before acting;
+5. checks exact `v=VIDEO_ID` membership on the exact destination playlist before insertion;
+6. for missing destinations, creates the playlist and then rediscovers exactly one live playlist with that title before treating creation as successful;
+7. navigates to the exact `watch?v=VIDEO_ID` page for insertion and verifies the page identity before touching the Save dialog;
+8. selects exactly one destination title in the Save dialog;
+9. verifies the video ID again immediately before the save action;
+10. does not consider the click successful until exact destination membership is visible afterward.
+
+If these checks cannot establish identity safely, execution fails/checkpoints the item instead of guessing.
+
+Planner-time `already_present` inventory is still rechecked live; only live membership evidence is a completed browser checkpoint.
+
+## Localization / UI changes
+
+Default UI labels are English:
+
+```text
+Save
+New playlist
+Create
+```
+
+Override them when required:
+
+```bash
+watchlater-playlist execute --run-id PLAN_ID --apply \
+    --save-label 'Save' \
+    --new-playlist-label 'New playlist' \
+    --create-label 'Create'
+```
+
+You can also choose a Playwright Chromium channel and profile explicitly:
+
+```bash
+watchlater-playlist execute --run-id PLAN_ID --apply \
+    --channel chrome \
+    --user-data-dir ~/.local/share/watchlater-playwright
+```
+
+DOM/text changes may still require code updates; the client intentionally fails when its identity/menu assumptions do not match the current UI.
+
+## Playlist creation privacy
+
+Plans retain their requested privacy (`private`, `unlisted`, or `public`). The browser adapter assumes YouTube's normal private default for `private`; for non-private creation it requires an identifiable privacy combobox and exact matching option. If the current UI does not expose that safely, it refuses rather than silently creating the wrong privacy.
+
+## Checkpoint/resume semantics
+
+`execute_browser_plan()` continues to provide the execution-neutral safety layer:
+
+- stale decision-event IDs are refused;
+- the current move decision is rechecked immediately before live membership/write operations;
+- duplicate live membership becomes `already_present` success;
+- creation, insertion and failures are checkpointed in SQLite;
+- successful browser evidence updates the local playlist inventory;
+- `failed`/unfinished operations remain retriable;
+- successful operations are not repeated on resume;
+- `--max-writes` counts actual playlist creations plus item insertions only.
+
+## Interaction with Watch Later removal
+
+A confirmed browser `inserted` or live-verified `already_present` checkpoint for the exact move decision satisfies the move gate used by `watchlater-remove plan`. Watch Later removal remains a separate explicit operation and never happens automatically as a side effect of destination insertion.

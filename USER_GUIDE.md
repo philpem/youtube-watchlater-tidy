@@ -31,15 +31,15 @@ self-contained HTML human review
       v
 current reviewed/rule decisions
       |
-      +--> move ----------> destination playlist plan/API execution --+
-      |                                                              |
-      +--> delete/archive --------------------------------------------+
-                                                                     |
-                                                                     v
-                                                        Watch Later removal plan
-                                                                     |
-                                                                     v
-                                                  explicit Playwright execution
+      +--> move ----------> destination playlist plan -> API or Playwright execution --+
+      |                                                                                 |
+      +--> delete/archive ---------------------------------------------------------------+
+                                                                                        |
+                                                                                        v
+                                                                           Watch Later removal plan
+                                                                                        |
+                                                                                        v
+                                                                     explicit Playwright execution
 ```
 
 Important invariants:
@@ -68,7 +68,7 @@ Optional normal-playlist API support:
 pip install -e '.[youtube-api]'
 ```
 
-Optional Watch Later browser support:
+Optional browser support for destination playlists and Watch Later:
 
 ```bash
 pip install -e '.[browser]'
@@ -83,7 +83,7 @@ Important commands:
 - `watchlater-transcript` — selective caption acquisition.
 - `watchlater-llm` / `watchlater-llm-transcript` — LLM classification/refinement.
 - `watchlater-review` — local HTML review and human override import.
-- `watchlater-playlist` — normal-playlist inventory, planning and API execution.
+- `watchlater-playlist` — normal-playlist inventory, planning and API/Playwright execution.
 - `watchlater-remove` — selective Watch Later planning and Playwright execution.
 
 Most commands default to `watchlater.sqlite3`.
@@ -245,24 +245,29 @@ Imported overrides become append-only human decision events.
 
 ## 9. Plan and execute destination playlist moves
 
-Install the API extra, create a Google OAuth Desktop client, and refresh owned playlists:
+Refresh/import normal-playlist inventory first:
 
 ```bash
 watchlater-playlist inventory refresh
 ```
 
-Create a plan from current `move` decisions:
+Create a plan from current `move` decisions using either backend:
 
 ```bash
 watchlater-playlist plan --backend api --output playlist-plan.json
+watchlater-playlist plan --backend browser --output playlist-plan.json
 watchlater-playlist show
 ```
 
-Inspect execution without any writes:
+Both backends share the same plan/checkpoint model. Browser plans have zero API quota cost.
+
+Inspect execution without writes:
 
 ```bash
 watchlater-playlist execute --run-id PLAN_ID
 ```
+
+### API backend
 
 Apply cautiously:
 
@@ -270,8 +275,28 @@ Apply cautiously:
 watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
 ```
 
-The executor checks live membership before insertion, checkpoints every result, refuses stale
-plans, and resumes without repeating confirmed work. See [`docs/playlist-sync.md`](docs/playlist-sync.md).
+### Playwright backend
+
+Use the shared dedicated automation profile:
+
+```bash
+watchlater-playlist browser-login
+```
+
+Then apply a browser plan cautiously:
+
+```bash
+watchlater-playlist execute --run-id BROWSER_PLAN_ID \
+    --apply --max-writes 3
+```
+
+Headed mode is the default. The browser adapter verifies exact playlist IDs and exact video
+IDs before/after UI actions, fails on ambiguous destination titles, and confirms membership
+after a Save action before checkpointing success.
+
+Both executors check live membership before insertion, checkpoint every result, refuse stale
+plans, and resume without repeating confirmed work. See [`docs/playlist-sync.md`](docs/playlist-sync.md)
+and [`docs/playlist-browser.md`](docs/playlist-browser.md).
 
 ## 10. Build a Watch Later removal plan
 
@@ -291,10 +316,13 @@ changes.
 
 ## 11. Set up the Playwright Watch Later profile
 
-Use a dedicated automation profile, not your normal browser profile:
+The destination-playlist and Watch Later browser executors intentionally share the same
+dedicated automation profile:
 
 ```bash
 watchlater-remove login
+# or
+watchlater-playlist browser-login
 ```
 
 The default profile directory is:
@@ -393,7 +421,7 @@ watchlater-review build review.html
 watchlater-review import watchlater-review-1.json --dry-run
 watchlater-review import watchlater-review-1.json
 
-# execute reviewed/rule-approved moves first
+# execute reviewed/rule-approved moves first (API or browser)
 watchlater-playlist inventory refresh
 watchlater-playlist plan --backend api
 watchlater-playlist execute --run-id PLAN_ID
@@ -410,12 +438,13 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
 
 ## 15. Current limitations
 
-- Browser-backed **destination-playlist insertion** is not implemented; current real normal-
-  playlist writes use the official YouTube Data API backend.
 - One current `move` decision targets one destination playlist; explicit multi-destination
   execution is not yet modelled.
-- Watch Later UI selectors/text can change without notice; browser execution deliberately
-  fails rather than guessing when identity/menu checks do not match.
+- YouTube UI selectors/text can change without notice; browser execution deliberately fails
+  rather than guessing when identity/menu checks do not match.
+- Browser playlist creation currently relies on YouTube's normal private default for private
+  playlists; non-private creation is attempted only when a recognizable privacy control is
+  present.
 - Transcript escalation uses existing captions only; audio transcription is not performed by
   default.
 
@@ -428,6 +457,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
 - [`docs/transcripts.md`](docs/transcripts.md) — caption acquisition/refinement.
 - [`docs/review.md`](docs/review.md) — static HTML human review.
 - [`docs/playlist-sync.md`](docs/playlist-sync.md) — destination planning/API execution.
+- [`docs/playlist-browser.md`](docs/playlist-browser.md) — destination Playwright execution.
 - [`docs/watchlater-removal.md`](docs/watchlater-removal.md) — selective source removal.
 
 Use `COMMAND --help` as the definitive option reference for the installed version.
