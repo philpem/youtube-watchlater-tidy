@@ -6,18 +6,18 @@ import sys
 from pathlib import Path
 
 from .db import open_catalogue
+from .multi_destination import create_plan, record_selection_move
+from .multi_destination_support import plan_payload
 from .playlist_browser import execute_browser_plan
 from .playlist_playwright import PlaywrightPlaylistClient
 from .playlist_sync import (
     DEFAULT_API_QUOTA_LIMIT,
     DEFAULT_PLAYLIST_CREATE_COST,
     DEFAULT_PLAYLIST_INSERT_COST,
-    create_plan,
     import_inventory,
     inventory_payload,
     latest_plan_id,
     load_inventory_file,
-    plan_payload,
 )
 from .watchlater_browser import DEFAULT_BROWSER_PROFILE, open_login_session
 from .youtube_api import (
@@ -85,6 +85,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     login.add_argument("--user-data-dir", type=Path, default=DEFAULT_BROWSER_PROFILE)
     login.add_argument("--channel")
+
+    assign = sub.add_parser(
+        "assign",
+        help="record an explicit move decision to one or more destination playlists",
+    )
+    assign.add_argument(
+        "--playlist",
+        action="append",
+        dest="playlists",
+        required=True,
+        help="destination playlist; repeat for multiple destinations",
+    )
+    assign.add_argument("--selection", type=int, help="selection id (default: latest selection)")
+    assign.add_argument("--snapshot", type=int, help="snapshot id for latest-selection lookup")
+    assign.add_argument("--reason")
 
     plan = sub.add_parser(
         "plan",
@@ -167,6 +182,20 @@ def _cmd_inventory(args: argparse.Namespace) -> int:
             print(json.dumps(inventory_payload(conn), ensure_ascii=False, indent=2, sort_keys=True))
             return 0
     raise ValueError(f"unknown inventory command {args.inventory_command!r}")
+
+
+def _cmd_assign(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        count = record_selection_move(
+            conn,
+            destinations=args.playlists,
+            selection_id=args.selection,
+            snapshot_id=args.snapshot,
+            reason=args.reason,
+        )
+    destinations = " + ".join(args.playlists)
+    print(f"Recorded move -> {destinations} for {count} video(s)")
+    return 0
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
@@ -302,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "browser-login":
             open_login_session(user_data_dir=args.user_data_dir, channel=args.channel)
             return 0
+        if args.command == "assign":
+            return _cmd_assign(args)
         if args.command == "plan":
             return _cmd_plan(args)
         if args.command == "show":

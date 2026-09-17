@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .db import open_catalogue
+from .multi_destination_support import create_removal_plan
 from .watchlater_browser import (
     DEFAULT_BROWSER_PROFILE,
     PlaywrightWatchLaterClient,
@@ -13,7 +14,6 @@ from .watchlater_browser import (
     open_login_session,
 )
 from .watchlater_removal import (
-    create_removal_plan,
     latest_removal_plan_id,
     removal_plan_payload,
 )
@@ -82,7 +82,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     if result.blocked_move_count:
         print(
             f"warning: {result.blocked_move_count} move decision(s) were excluded because "
-            "their destination is not confirmed for the same decision event",
+            "not every destination is confirmed for the same decision event",
             file=sys.stderr,
         )
     return 0

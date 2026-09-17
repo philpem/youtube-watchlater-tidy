@@ -2,17 +2,18 @@
 
 Playlist synchronization deliberately separates **classification**, **planning**, and **execution**. A stored LLM suggestion is never executable merely because a model proposed `move`; only a current local `move` decision is allowed into a plan.
 
-The current implementation supports:
+The implementation supports:
 
 1. destination-playlist inventory from versioned JSON or the authenticated YouTube Data API;
-2. persistent/idempotent move planning;
-3. quota and stale-decision checks;
-4. authenticated YouTube Data API execution for normal playlists;
-5. authenticated Playwright execution for quota-heavy browser moves;
-6. resumable per-playlist/per-video checkpoints;
-7. safe hand-off to the separate Watch Later removal executor after destination success.
+2. single- or multi-destination move decisions;
+3. persistent/idempotent planning;
+4. quota and stale-decision checks;
+5. authenticated YouTube Data API execution;
+6. authenticated Playwright execution for quota-heavy browser moves;
+7. resumable per-destination/per-video checkpoints;
+8. safe hand-off to Watch Later removal only after every requested destination succeeds.
 
-A successful destination insertion does **not** itself remove the source item from Watch Later. `watchlater-remove plan` accepts a `move` only after the exact move decision has a confirmed destination checkpoint (`inserted`, or `already_present` after a live re-check).
+A successful destination insertion never removes the source item by itself.
 
 ## Inventory
 
@@ -24,24 +25,48 @@ watchlater-playlist inventory refresh
 watchlater-playlist inventory show
 ```
 
-The versioned JSON inventory can also be imported manually:
+Or import the versioned JSON inventory manually:
 
 ```bash
 watchlater-playlist inventory import playlist-inventory.json
 ```
 
-The format remains `youtube-watchlater-tidy-playlist-inventory-v1`; see [`examples/playlist-inventory.example.json`](../examples/playlist-inventory.example.json).
+The format is `youtube-watchlater-tidy-playlist-inventory-v1`; see [`examples/playlist-inventory.example.json`](../examples/playlist-inventory.example.json).
 
-Duplicate playlist IDs and duplicate video IDs inside one playlist are rejected. Duplicate **titles** are retained because YouTube permits them; planning refuses an ambiguous title rather than guessing.
+Duplicate playlist IDs and duplicate video IDs inside one playlist are rejected. Duplicate titles are retained because YouTube permits them; planning refuses an ambiguous title rather than guessing.
+
+## Record move destinations
+
+The ordinary single-destination workflow remains:
+
+```bash
+watchlater selection action move --playlist 'Queue - Electronics'
+```
+
+For an explicit one-video/cohort-to-many-playlists decision, use the current selection with repeated `--playlist` options:
+
+```bash
+watchlater-playlist assign \
+    --selection 12 \
+    --playlist 'Queue - Electronics' \
+    --playlist 'Reference - Repairs'
+```
+
+This records one current `move` decision per selected video with an ordered destination set. Duplicate destination names are collapsed case-insensitively.
+
+For backward compatibility, the first destination is also stored in `decision_events.destination_playlist`. The complete set is stored in `decision_event_destinations` and is authoritative for playlist planning/execution.
+
+Existing databases and older single-destination decisions are backfilled automatically when the multi-destination support is first used.
+
+Changing/superseding the move decision replaces the destination set as a whole.
 
 ## Build a move plan
 
-Only current catalogue decisions where `action = move` are included. LLM proposals remain advisory until a human/rule workflow turns them into a current decision.
-
-Create either backend from the same local intent:
+Only current `move` decisions are included. LLM proposals remain advisory until a human/rule workflow creates a current decision.
 
 ```bash
 watchlater-playlist plan --backend api
+# or
 watchlater-playlist plan --backend browser
 watchlater-playlist show
 ```
@@ -52,17 +77,19 @@ For every destination:
 - no match -> `create_planned`;
 - more than one title match -> planning fails as ambiguous.
 
+For a multi-destination decision, planning expands the decision into one independently checkpointed item for every `(video_id, destination_playlist)` pair. All items retain the same authorizing `decision_events.id`.
+
 New destinations default to private:
 
 ```bash
 watchlater-playlist plan --backend api --new-playlist-privacy unlisted
 ```
 
-The plan stores the exact `decision_events.id` authorizing every move. If the decision changes later, `watchlater-playlist show` marks that item stale and both executors refuse it.
+If the current decision event changes, every item derived from the old event becomes stale.
 
 ## API quota planning
 
-API plans default to the currently configured costs of 50 units per playlist creation and 50 units per playlist-item insertion, against a 10,000-unit allowance. They are planner inputs, not schema invariants:
+API plans default to 50 units per playlist creation and 50 units per playlist-item insertion against a 10,000-unit allowance. These are planner inputs, not schema invariants:
 
 ```bash
 watchlater-playlist plan \
@@ -72,7 +99,7 @@ watchlater-playlist plan \
     --playlist-insert-cost 50
 ```
 
-Browser plans have zero API quota estimate.
+The estimate counts every missing destination membership independently. Browser plans have zero API quota estimate.
 
 ## Dry-run execution
 
@@ -86,69 +113,57 @@ No OAuth client or Playwright browser is created unless `--apply` is present.
 
 ## API execution
 
-Install API support and authorize a Google OAuth Desktop app:
-
 ```bash
 pip install -e '.[youtube-api]'
 watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
 ```
 
-The API executor:
+The API executor verifies live playlists, resolves/creates missing destinations, rechecks the exact current move decision and destination authorization immediately before each membership/write step, checks live membership, avoids duplicate insertion, checkpoints success/failure, and updates the local inventory.
 
-1. lists owned playlists again;
-2. verifies planned stable playlist IDs;
-3. resolves `create_planned` titles against the live account before creating anything;
-4. refuses ambiguous live titles;
-5. refuses to silently recreate a previously known destination ID that disappeared;
-6. re-checks the current decision immediately before the live membership/write step;
-7. checks live destination membership immediately before insertion;
-8. treats a live duplicate as `already_present` success;
-9. checkpoints creation, insertion and failure in SQLite;
-10. updates the local inventory from confirmed live evidence.
-
-See the root user guide for OAuth paths and options.
+A secondary destination on a multi-destination decision is valid because authorization checks the complete destination set attached to the same exact decision-event ID.
 
 ## Playwright execution
-
-Install browser support and create the shared dedicated authenticated profile:
 
 ```bash
 pip install -e '.[browser]'
 playwright install chromium
 watchlater-playlist browser-login
-```
 
-Then apply a browser plan cautiously:
-
-```bash
 watchlater-playlist execute --run-id BROWSER_PLAN_ID \
     --apply --max-writes 3
 ```
 
-The Playwright backend uses the same checkpoint model as the API backend. It discovers exact playlist IDs, verifies exact `v=VIDEO_ID` membership, re-resolves missing destinations, confirms membership after Save actions, and fails rather than guessing when identities or titles are ambiguous. Headed mode is the default.
+The Playwright backend uses the same checkpoint model. It discovers exact playlist IDs, verifies exact `v=VIDEO_ID` membership, creates/re-resolves missing destinations, confirms membership after Save actions, and fails rather than guessing on ambiguous identity. Headed mode is the default.
 
-See [`playlist-browser.md`](playlist-browser.md) for browser-specific selectors, localization controls and identity checks.
+See [`playlist-browser.md`](playlist-browser.md) for browser-specific controls and identity checks.
 
 ## Write caps, resume and idempotence
 
-`--max-writes` counts actual playlist creations plus video insertions. Read-only live checks do not count. Hitting the cap leaves the run `partial`; repeat the same command later to resume from persistent checkpoints.
+`--max-writes` counts actual playlist creations plus video insertions. Read-only live checks do not count. Hitting the cap leaves the run `partial`; repeat the same command later to resume.
 
-Successful insertions are not repeated on resume. Failed items remain retriable. Planner-time `already_present` is rechecked live before becoming a completed checkpoint.
+Successful `(video,destination)` insertions are not repeated. Failed items remain retriable. Planner-time `already_present` is rechecked live before becoming a completed checkpoint.
 
 ## Watch Later coordination
 
-After an API or browser destination insertion succeeds (or live membership confirms the item is already present), build a separate removal plan:
+After destination synchronization, build a separate removal plan:
 
 ```bash
 watchlater-remove plan
 watchlater-remove show
 ```
 
-Only the exact current move decision with a confirmed destination checkpoint is eligible. Source removal remains an explicit Playwright operation under `watchlater-remove`; it never happens automatically as a side effect of playlist synchronization.
+For `delete` and `archive`, no destination gate applies. For `move`:
 
-## Remaining issue #10 scope
+- a single-destination decision must have that destination confirmed;
+- a multi-destination decision must have **every destination** confirmed for the same exact decision-event ID.
 
-Both execution backends and Watch Later coordination are implemented. The significant remaining requirement is modelling an explicit **one-video-to-multiple-destination-playlists** assignment. The current decision model still stores one `destination_playlist` on each current `move` decision.
+Accepted confirmations are `inserted`, or `already_present` after a live executor check (`attempted_at` non-null). Inventory-only membership does not authorize removal.
+
+If any destination is missing, the removal planner blocks that video and reports the missing destination names. Source removal remains an explicit separate operation.
+
+## Current scope
+
+Both execution backends, Watch Later coordination, and explicit one-video-to-many-destination assignment are implemented. Saved rules and LLM destination proposals remain single-destination; multi-destination assignment is currently an explicit human operation through `watchlater-playlist assign`.
 
 Current quota references:
 

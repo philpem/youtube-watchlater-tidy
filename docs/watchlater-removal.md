@@ -1,12 +1,11 @@
 # Selective Watch Later removal
 
-Issue #7 uses two deliberately separate layers:
+Watch Later cleanup deliberately separates planning from execution:
 
 1. a local removal plan/checkpoint layer;
 2. a Playwright executor that applies an already-reviewed plan by exact video ID.
 
-The planner never changes YouTube. Browser execution is dry-run by default and requires two
-explicit destructive flags before it can click `Remove from Watch later`.
+The planner never changes YouTube. Browser execution is dry-run by default and requires two explicit destructive flags before it can click `Remove from Watch later`.
 
 ## Build a removal plan
 
@@ -20,89 +19,84 @@ or target a particular imported snapshot:
 watchlater-remove plan --snapshot 2 --output removal-plan.json
 ```
 
-The planner considers only current local decisions with actions:
+The planner considers only current decisions with actions:
 
 - `delete`;
 - `archive`;
-- `move` **after its destination has been confirmed for the exact same decision event**.
+- `move`, but only after all required destination playlists have been confirmed for the exact same decision event.
 
 `keep` and `review` are never removal candidates.
 
 ## Move safety gate
 
-A `move` means "add to the destination first, then remove from Watch Later". Therefore a
-move is excluded from the removal plan unless a playlist-sync checkpoint exists for the
-same:
+A `move` means "add to destination playlist(s) first, then remove from Watch Later".
+
+For a single-destination move, the planner requires a playlist-sync checkpoint matching the same:
 
 - video ID;
 - `decision_events.id`;
 - destination playlist name.
 
+For a multi-destination move, **every destination on that decision event must be confirmed independently** before the video is eligible for Watch Later removal.
+
 Accepted destination checkpoints are:
 
 - `inserted`; or
-- `already_present` **after a live executor re-check**, represented by `attempted_at` being
-  non-null.
+- `already_present` after a live executor re-check, represented by `attempted_at` being non-null.
 
-An `already_present` value inherited only from an old playlist inventory is deliberately
-not enough to authorize source removal.
+An `already_present` value inherited only from an old playlist inventory is deliberately not enough.
 
-Blocked moves are shown in the plan output with a reason, but are not inserted into the
-executable removal-item set.
+If one or more destinations are still missing, the move is excluded from the executable removal set. The plan JSON reports the complete destination set plus `missing_destinations`, so it is clear why the item remains blocked.
+
+Changing the current move decision supersedes the destination set as a whole; an old playlist-sync result from a previous decision event cannot authorize removal.
 
 ## Stale plans
 
-Every removal item stores the exact decision-event ID that authorized it. Inspect a stored
-plan with:
+Every removal item stores the exact decision-event ID that authorized it. Inspect a stored plan with:
 
 ```bash
 watchlater-remove show
 watchlater-remove show --run-id 3
 ```
 
-If the current action/destination has changed since planning, the item is reported as:
+If the current decision changes since planning, the item is reported with:
 
 ```json
 "stale": true
 ```
 
-The executor refuses a plan containing stale items before opening a destructive run, and it
-checks authorization again immediately before each browser attempt.
+The executor refuses a plan containing stale items before opening a destructive run and rechecks authorization immediately before each browser attempt.
 
 ## Install Playwright support
-
-The browser executor is optional:
 
 ```bash
 pip install -e '.[browser]'
 playwright install chromium
 ```
 
-The default persistent profile is:
+The destination-playlist and Watch Later browser executors share the dedicated profile:
 
 ```text
 .watchlater-playwright-profile/
 ```
 
-It is ignored by Git. Use this dedicated automation profile rather than your normal browser
-profile.
+It is ignored by Git. Use the automation profile rather than your normal browser profile.
 
-Open it interactively to sign in to YouTube once:
+Sign in once:
 
 ```bash
 watchlater-remove login
 ```
 
-The command opens Watch Later in a persistent Chromium context. Sign in manually if needed,
-then return to the terminal and press Enter to close the browser. Subsequent executor runs
-reuse the same profile.
+or equivalently:
 
-Use `--user-data-dir PATH` to choose another profile directory. `--channel` can select a
-Playwright-installed browser channel when required.
+```bash
+watchlater-playlist browser-login
+```
+
+Use `--user-data-dir PATH` for another profile. `--channel` can select a Playwright browser channel.
 
 ## Dry-run execution
-
-Inspect what the executor would process without starting Playwright:
 
 ```bash
 watchlater-remove execute --run-id 3
@@ -112,7 +106,7 @@ Without `--apply`, there is no browser creation and no checkpoint mutation.
 
 ## Destructive execution
 
-A real run requires **both** flags:
+A real run requires both flags:
 
 ```bash
 watchlater-remove execute --run-id 3 \
@@ -120,10 +114,7 @@ watchlater-remove execute --run-id 3 \
     --confirm-remove
 ```
 
-`--apply` alone is rejected. This is intentional because Watch Later removal cannot be
-undone reliably from the tool.
-
-Start with a small cap:
+`--apply` alone is rejected. Start with a small cap:
 
 ```bash
 watchlater-remove execute --run-id 3 \
@@ -131,27 +122,23 @@ watchlater-remove execute --run-id 3 \
     --max-deletes 3
 ```
 
-Completed `removed` / `already_absent` rows are terminal checkpoints and are skipped on a
-later resume. `not_found` and `failed` remain retriable.
+Completed `removed` / `already_absent` rows are terminal checkpoints and are skipped on resume. `not_found` and `failed` remain retriable.
 
 ## Exact-ID browser behavior
 
-The browser adapter does not trust playlist order. For each planned video it:
+For each planned video the browser adapter:
 
-1. opens the Watch Later playlist;
-2. progressively scrolls until an exact `v=VIDEO_ID` row is found or the loaded playlist is
-   stable;
-3. parses the row's watch URL and verifies the exact video ID;
+1. opens Watch Later;
+2. progressively scrolls until an exact `v=VIDEO_ID` row is found or the loaded playlist is stable;
+3. verifies the exact video ID from the row URL;
 4. opens that row's action menu;
-5. verifies the exact row identity again immediately before the destructive click;
-6. clicks the configured `Remove from Watch later` menu item;
+5. verifies identity again immediately before the destructive click;
+6. clicks the configured `Remove from Watch later` item;
 7. confirms the exact row disappeared before returning `removed`.
 
-If the page reaches a stable complete scan without that exact ID, the result is
-`already_absent`. If the configured scroll limit is reached first, the result is `not_found`
-and remains retriable.
+If a stable full scan contains no exact ID, the result is `already_absent`. If the configured scroll limit is reached first, the result is `not_found` and remains retriable.
 
-YouTube's DOM and UI text are not a stable API. Useful compatibility options include:
+Useful localization/UI options:
 
 ```bash
 watchlater-remove execute --run-id 3 --apply --confirm-remove \
@@ -161,8 +148,7 @@ watchlater-remove execute --run-id 3 --apply --confirm-remove \
     --scroll-pause 0.7
 ```
 
-For another YouTube language, pass the actual localized remove-menu text with
-`--remove-label` rather than allowing the tool to guess a destructive action.
+For another YouTube language, pass the actual localized destructive text rather than allowing the tool to guess.
 
 ## Pacing and retries
 
@@ -175,7 +161,7 @@ exponential retry backoff base: 2 seconds
 maximum removals per invocation: 10
 ```
 
-Override them explicitly when needed:
+Override explicitly when needed:
 
 ```bash
 watchlater-remove execute --run-id 3 --apply --confirm-remove \
@@ -185,12 +171,9 @@ watchlater-remove execute --run-id 3 --apply --confirm-remove \
     --backoff 3
 ```
 
-A small `--max-deletes` is recommended for initial real-world testing because YouTube UI
-changes can break selectors at any time.
+A small `--max-deletes` is recommended for initial real-world testing because YouTube UI changes can break selectors at any time.
 
 ## Checkpoint states
-
-The removal table distinguishes:
 
 - `planned` — not attempted yet;
 - `removed` — confirmed removed from Watch Later;
@@ -199,24 +182,16 @@ The removal table distinguishes:
 - `failed` — browser attempt raised/final verification failed;
 - `skipped` — intentionally deferred.
 
-`removed` and `already_absent` are terminal success states. `not_found`, `failed`, and
-`skipped` are eligible for later retry. The imported catalogue/snapshot remains intact after
-successful removal.
+`removed` and `already_absent` are terminal success states. `not_found`, `failed`, and `skipped` are eligible for later retry. The imported catalogue/snapshot remains intact after successful removal.
 
 ## Headless mode
 
-Interactive/headed execution is the default because it makes destructive behavior visible.
-For established automation, `--headless` is available:
+Headed execution is the default because it keeps destructive behavior visible. For an already-validated setup:
 
 ```bash
 watchlater-remove execute --run-id 3 --apply --confirm-remove --headless
 ```
 
-Use headless mode only after validating the selectors and profile interactively.
-
 ## Scope
 
-This executor removes exact planned IDs from **Watch Later only**. Normal destination
-playlist creation/insertion is handled separately by `watchlater-playlist`. Browser-backed
-bulk destination-playlist insertion remains separate work; it is not conflated with source
-removal.
+This executor removes exact planned IDs from Watch Later only. Normal destination playlist creation/insertion is handled by `watchlater-playlist` using either the API or Playwright backend. Those destination executors may confirm one or many playlist targets for the same move decision; Watch Later removal remains a separate explicit step and waits until all requested destinations are confirmed.

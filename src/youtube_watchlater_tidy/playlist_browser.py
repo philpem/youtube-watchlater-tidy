@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Protocol, TypeVar
 
-from .playlist_sync import ensure_playlist_sync_schema, plan_payload
+from .multi_destination import current_move_authorizes_destination
+from .multi_destination_support import plan_payload
+from .playlist_sync import ensure_playlist_sync_schema
 
 
 @dataclass(frozen=True)
@@ -51,19 +53,12 @@ def _utc_now() -> str:
 
 
 def _current_decision_matches(conn: sqlite3.Connection, run: sqlite3.Row, item: sqlite3.Row) -> bool:
-    row = conn.execute(
-        """
-        SELECT id, action, destination_playlist
-        FROM current_decisions
-        WHERE snapshot_id = ? AND video_id = ?
-        """,
-        (run["snapshot_id"], item["video_id"]),
-    ).fetchone()
-    return bool(
-        row is not None
-        and row["id"] == item["decision_event_id"]
-        and row["action"] == "move"
-        and row["destination_playlist"] == item["destination_name"]
+    return current_move_authorizes_destination(
+        conn,
+        snapshot_id=int(run["snapshot_id"]),
+        video_id=str(item["video_id"]),
+        decision_event_id=int(item["decision_event_id"]),
+        destination_playlist=str(item["destination_name"]),
     )
 
 
@@ -195,7 +190,7 @@ def _retry(
     for attempt in range(retries + 1):
         try:
             return fn()
-        except Exception as exc:  # browser/UI failures are retriable at this boundary
+        except Exception as exc:
             last = exc
             if attempt >= retries:
                 raise
@@ -217,13 +212,6 @@ def execute_browser_plan(
     backoff: float = 2.0,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> BrowserExecutionResult:
-    """Inspect or execute one persisted browser-backend playlist plan.
-
-    This module deliberately contains no Playwright selectors. A later UI adapter implements
-    PlaylistBrowserClient; tests can supply a fake client now. With apply=False there is no
-    browser/network access and no checkpoint mutation.
-    """
-
     ensure_playlist_sync_schema(conn)
     if max_writes is not None and max_writes < 0:
         raise ValueError("--max-writes cannot be negative")
