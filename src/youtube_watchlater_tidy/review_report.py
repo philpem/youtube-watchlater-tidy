@@ -327,7 +327,7 @@ function exportOverrides() {{
     if(x?.action) decisions.push({{video_id:r.video_id,action:x.action,note:x.note||null}});
   }}
   const payload={{format:'{REVIEW_FORMAT}',snapshot_id:DATA.snapshot_id,created_at:new Date().toISOString(),decisions}};
-  const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{{type:'application/json'}});
+  const blob=new Blob([JSON.stringify(payload,null,2)+'\\n'],{{type:'application/json'}});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   a.download=`watchlater-review-${{DATA.snapshot_id}}.json`;

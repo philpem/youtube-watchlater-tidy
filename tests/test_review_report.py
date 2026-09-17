@@ -184,6 +184,8 @@ class ReviewReportTests(unittest.TestCase):
         self.assertIn(REVIEW_FORMAT, page)
         self.assertIn("Export explicit overrides", page)
         self.assertIn("human-review-report", page)
+        self.assertIn("JSON.stringify(payload,null,2)+\'\\n\'", page)
+        self.assertNotIn("JSON.stringify(payload,null,2)+\'" + chr(10) + "\'", page)
 
     def test_dry_run_and_import_are_safe_and_idempotent(self) -> None:
         payload = {
