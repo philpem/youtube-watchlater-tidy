@@ -10,11 +10,12 @@ from typing import Any, Protocol
 
 from tqdm import tqdm
 
+from .multi_destination import current_move_authorizes_destination
+from .multi_destination_support import plan_payload
 from .playlist_sync import (
     INVENTORY_FORMAT,
     ensure_playlist_sync_schema,
     import_inventory,
-    plan_payload,
 )
 
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
@@ -137,18 +138,14 @@ def authenticated_client(
     client_secrets: str | Path = DEFAULT_CLIENT_SECRETS,
     token_file: str | Path = DEFAULT_TOKEN_FILE,
 ) -> GoogleYouTubeClient:
-    """Authorize an installed application and return a YouTube Data API client.
-
-    Google dependencies are imported lazily so normal catalogue/LLM installs do not need
-    the YouTube API extra.
-    """
+    """Authorize an installed application and return a YouTube Data API client."""
 
     try:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
-    except ImportError as exc:  # pragma: no cover - exercised without optional deps
+    except ImportError as exc:
         raise RuntimeError(
             "YouTube API support is not installed; run `pip install -e '.[youtube-api]'`"
         ) from exc
@@ -258,19 +255,12 @@ class ApiExecutionResult:
 
 
 def _current_decision_matches(conn: sqlite3.Connection, run: sqlite3.Row, item: sqlite3.Row) -> bool:
-    row = conn.execute(
-        """
-        SELECT id, action, destination_playlist
-        FROM current_decisions
-        WHERE snapshot_id = ? AND video_id = ?
-        """,
-        (run["snapshot_id"], item["video_id"]),
-    ).fetchone()
-    return bool(
-        row is not None
-        and row["id"] == item["decision_event_id"]
-        and row["action"] == "move"
-        and row["destination_playlist"] == item["destination_name"]
+    return current_move_authorizes_destination(
+        conn,
+        snapshot_id=int(run["snapshot_id"]),
+        video_id=str(item["video_id"]),
+        decision_event_id=int(item["decision_event_id"]),
+        destination_playlist=str(item["destination_name"]),
     )
 
 
@@ -420,12 +410,6 @@ def execute_api_plan(
     allow_over_quota: bool = False,
     max_writes: int | None = None,
 ) -> ApiExecutionResult:
-    """Inspect or execute one persisted API plan.
-
-    With apply=False this performs no network access and no checkpoint mutation. With
-    apply=True, the caller must supply an authenticated client.
-    """
-
     ensure_playlist_sync_schema(conn)
     if max_writes is not None and max_writes < 0:
         raise ValueError("--max-writes cannot be negative")

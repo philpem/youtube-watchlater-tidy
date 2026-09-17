@@ -31,25 +31,23 @@ self-contained HTML human review
       v
 current reviewed/rule decisions
       |
-      +--> move ----------> destination playlist plan -> API or Playwright execution --+
-      |                                                                                 |
-      +--> delete/archive ---------------------------------------------------------------+
-                                                                                        |
-                                                                                        v
-                                                                           Watch Later removal plan
-                                                                                        |
-                                                                                        v
-                                                                     explicit Playwright execution
+      +--> move -> one or more destination playlists -> API / Playwright execution --+
+      |                                                                         |
+      +--> delete/archive -------------------------------------------------------+
+                                                                                |
+                                                                                v
+                                                                   Watch Later removal plan
+                                                                                |
+                                                                                v
+                                                             explicit Playwright execution
 ```
 
 Important invariants:
 
 1. Enrichment never rewrites imported snapshot fields.
 2. LLM output is advisory evidence, not a `decision_event`.
-3. Playlist and Watch Later execution bind to exact decision-event IDs; changed decisions
-   make old plans stale.
-4. A `move` is never removed from Watch Later until the same move decision has a confirmed
-   destination insertion/live membership checkpoint.
+3. Playlist and Watch Later execution bind to exact decision-event IDs; changed decisions make old plans stale.
+4. A `move` is never removed from Watch Later until **every destination on that exact move decision** is confirmed inserted or live-present.
 5. API/browser execution is dry-run by default.
 
 ## 2. Install
@@ -83,7 +81,7 @@ Important commands:
 - `watchlater-transcript` — selective caption acquisition.
 - `watchlater-llm` / `watchlater-llm-transcript` — LLM classification/refinement.
 - `watchlater-review` — local HTML review and human override import.
-- `watchlater-playlist` — normal-playlist inventory, planning and API/Playwright execution.
+- `watchlater-playlist` — destination assignment, inventory, planning and API/Playwright execution.
 - `watchlater-remove` — selective Watch Later planning and Playwright execution.
 
 Most commands default to `watchlater.sqlite3`.
@@ -102,8 +100,7 @@ watchlater import watch-later.json
 watchlater snapshots
 ```
 
-The importer preserves exact playlist position and hashes the export, so importing the same
-file again is idempotent. Later exports become separate snapshots.
+The importer preserves exact playlist position and hashes the export, so importing the same file again is idempotent. Later exports become separate snapshots.
 
 ## 4. Inspect and repair metadata
 
@@ -128,22 +125,15 @@ watchlater videos --unavailable --recovered
 watchlater videos --unavailable --unrecovered
 ```
 
-Cached archive results are skipped before `--limit`, so repeated runs advance through the
-uncached remainder. Prefer explicit targets for `--refresh`.
+Cached archive results are skipped before `--limit`, so repeated runs advance through the uncached remainder. Prefer explicit targets for `--refresh`.
 
 ## 5. Cheap/manual triage first
-
-Creators:
 
 ```bash
 watchlater creators --remaining
 watchlater select creator CHANNEL_ID --remaining
 watchlater selection show
-```
 
-Titles and phrases:
-
-```bash
 watchlater select title --contains 'Super Mario' --remaining
 watchlater select title --regex 'conference|keynote' --remaining --max-duration 2h
 watchlater keywords --remaining --ngram 2 --min-count 3
@@ -163,9 +153,26 @@ Actions:
 - `review` — unresolved;
 - `archive` — worthwhile reference, later remove from Watch Later;
 - `delete` — discard candidate, later remove from Watch Later;
-- `move` — add to a destination first, then remove from Watch Later.
+- `move` — add to destination playlist(s), then remove from Watch Later only after all are confirmed.
 
-Reusable rules:
+### Multiple destination playlists
+
+The ordinary `watchlater selection action move --playlist ...` command remains the simple single-destination path.
+
+When one selected video/cohort should go to several playlists, record one multi-destination move decision explicitly:
+
+```bash
+watchlater-playlist assign \
+    --selection 12 \
+    --playlist 'Queue - Electronics' \
+    --playlist 'Reference - Repairs'
+```
+
+`--playlist` may be repeated. Duplicate names are collapsed case-insensitively while preserving the first spelling/order. The first destination is retained in the legacy `decision_events.destination_playlist` field for compatibility; the complete ordered set is stored separately and used by planning/execution.
+
+Changing the decision later supersedes the entire destination set.
+
+Reusable rules remain single-destination unless explicitly expanded later:
 
 ```bash
 watchlater selection save-rule 'electronics creator' move \
@@ -178,26 +185,16 @@ Rules only act on unresolved videos and never overwrite existing human decisions
 
 ## 6. DeArrow and LLM classification
 
-DeArrow:
-
 ```bash
 watchlater-dearrow enrich --all --remaining
 ```
 
-Configure providers using `examples/watchlater.example.toml` and an interest brief. The same
-OpenAI-compatible transport supports Ollama, Unsloth models served through vLLM/Ollama/
-llama-server, OpenRouter, and compatible remote endpoints.
-
-Verify a provider:
+Configure providers using `examples/watchlater.example.toml` and an interest brief. The OpenAI-compatible transport supports Ollama, Unsloth models served through vLLM/Ollama/llama-server, OpenRouter, and compatible remote endpoints.
 
 ```bash
 watchlater-llm --config watchlater.toml providers
 watchlater-llm --config watchlater.toml probe --provider ollama-local
-```
 
-First pass:
-
-```bash
 watchlater-llm --config watchlater.toml classify \
     --provider ollama-local --limit 20 --dry-run
 watchlater-llm --config watchlater.toml classify \
@@ -224,8 +221,7 @@ watchlater-llm-transcript --config watchlater.toml \
     --run-id 18 --provider ollama-local
 ```
 
-Existing manual captions are preferred; automatic captions are fallback. Audio is not
-transcribed by default.
+Existing manual captions are preferred; automatic captions are fallback. Audio is not transcribed by default.
 
 ## 8. Human review
 
@@ -233,8 +229,7 @@ transcribed by default.
 watchlater-review build review.html
 ```
 
-Open the self-contained HTML file locally, review current decisions and LLM suggestions, and
-export explicit overrides. Validate before import:
+Open the self-contained HTML locally, export explicit overrides, validate, then import:
 
 ```bash
 watchlater-review import watchlater-review-1.json --dry-run
@@ -251,25 +246,24 @@ Refresh/import normal-playlist inventory first:
 watchlater-playlist inventory refresh
 ```
 
-Create a plan from current `move` decisions using either backend:
+Create a plan from all destinations attached to each current `move` decision:
 
 ```bash
 watchlater-playlist plan --backend api --output playlist-plan.json
+# or
 watchlater-playlist plan --backend browser --output playlist-plan.json
 watchlater-playlist show
 ```
 
-Both backends share the same plan/checkpoint model. Browser plans have zero API quota cost.
+For a multi-destination decision, the plan contains one independently checkpointed item per `(video, destination)` pair. Quota estimates count every missing API insertion plus any required playlist creation.
 
-Inspect execution without writes:
+Inspect without writes:
 
 ```bash
 watchlater-playlist execute --run-id PLAN_ID
 ```
 
 ### API backend
-
-Apply cautiously:
 
 ```bash
 watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
@@ -283,41 +277,36 @@ Use the shared dedicated automation profile:
 watchlater-playlist browser-login
 ```
 
-Then apply a browser plan cautiously:
+Then apply cautiously:
 
 ```bash
 watchlater-playlist execute --run-id BROWSER_PLAN_ID \
     --apply --max-writes 3
 ```
 
-Headed mode is the default. The browser adapter verifies exact playlist IDs and exact video
-IDs before/after UI actions, fails on ambiguous destination titles, and confirms membership
-after a Save action before checkpointing success.
+Both executors check live membership before insertion, checkpoint every destination separately, refuse stale decision-event IDs, and resume without repeating confirmed work. A secondary destination is valid because authorization is checked against the complete destination set on the exact current decision.
 
-Both executors check live membership before insertion, checkpoint every result, refuse stale
-plans, and resume without repeating confirmed work. See [`docs/playlist-sync.md`](docs/playlist-sync.md)
-and [`docs/playlist-browser.md`](docs/playlist-browser.md).
+See [`docs/playlist-sync.md`](docs/playlist-sync.md) and [`docs/playlist-browser.md`](docs/playlist-browser.md).
 
 ## 10. Build a Watch Later removal plan
-
-Removal planning consumes current `delete`/`archive` decisions and eligible `move` decisions:
 
 ```bash
 watchlater-remove plan --output removal-plan.json
 watchlater-remove show
 ```
 
-A `move` is eligible only when its exact current decision has a confirmed destination
-checkpoint (`inserted`, or `already_present` after a live re-check). Inventory-only knowledge
-is deliberately insufficient.
+`delete` and `archive` decisions are directly eligible. A single-destination `move` requires that destination to be confirmed. A multi-destination `move` is eligible only when **every destination** on the same exact decision event has a successful checkpoint:
 
-Old removal plans are reported stale when the current action/destination/decision event
-changes.
+- `inserted`; or
+- `already_present` after a live executor re-check (`attempted_at` non-null).
 
-## 11. Set up the Playwright Watch Later profile
+Planner-time inventory-only membership is never enough. If even one destination remains unconfirmed, the source video stays in Watch Later and the removal plan reports the missing destination(s).
 
-The destination-playlist and Watch Later browser executors intentionally share the same
-dedicated automation profile:
+Old removal plans become stale when the current decision event changes.
+
+## 11. Set up the shared Playwright profile
+
+Destination-playlist and Watch Later browser executors intentionally share one dedicated automation profile:
 
 ```bash
 watchlater-remove login
@@ -325,18 +314,15 @@ watchlater-remove login
 watchlater-playlist browser-login
 ```
 
-The default profile directory is:
+Default profile:
 
 ```text
 .watchlater-playwright-profile/
 ```
 
-It is ignored by Git. Sign in to YouTube manually in the opened browser, return to the
-terminal, then press Enter to close it.
+It is ignored by Git. Sign in manually, then return to the terminal and press Enter to close it.
 
 ## 12. Dry-run selective Watch Later execution
-
-Inspect the latest or selected persisted plan without opening a browser:
 
 ```bash
 watchlater-remove execute --run-id REMOVAL_PLAN_ID
@@ -346,37 +332,16 @@ Without `--apply`, there is no browser creation and no checkpoint mutation.
 
 ## 13. Apply selective Watch Later removal
 
-Real removal requires **two explicit flags**:
+Real removal requires both explicit flags:
 
 ```bash
 watchlater-remove execute --run-id REMOVAL_PLAN_ID \
-    --apply \
-    --confirm-remove
+    --apply --confirm-remove --max-deletes 3
 ```
 
-Start with a small cap:
+The executor refuses stale plans, rechecks authorization immediately before browser work, finds rows by exact video ID, verifies identity before the destructive click, confirms disappearance, and checkpoints `removed`, `already_absent`, `not_found`, or `failed`.
 
-```bash
-watchlater-remove execute --run-id REMOVAL_PLAN_ID \
-    --apply --confirm-remove \
-    --max-deletes 3
-```
-
-The executor:
-
-- refuses stale plans before launching a destructive run;
-- rechecks authorization before each browser attempt;
-- finds rows by exact YouTube video ID rather than playlist order;
-- verifies the row's exact `v=VIDEO_ID` identity before opening its menu;
-- verifies that identity again immediately before clicking `Remove from Watch later`;
-- confirms the exact row disappeared after the click;
-- distinguishes `removed`, `already_absent`, `not_found`, and `failed`;
-- retries retriable failures with configurable exponential backoff;
-- checkpoints results and skips terminal successes on resume;
-- preserves the imported catalogue/snapshot after successful removal.
-
-Default safety controls include a maximum of 10 removals per invocation, a 2-second interval
-between confirmed removals, one retry, and conservative scrolling. Override only when needed:
+Useful conservative controls:
 
 ```bash
 watchlater-remove execute --run-id REMOVAL_PLAN_ID \
@@ -384,8 +349,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
     --max-deletes 5 --interval 3 --retries 2 --backoff 3
 ```
 
-For localized YouTube UIs, set the destructive menu text explicitly rather than allowing the
-tool to guess:
+For localized YouTube UIs, specify the actual destructive text:
 
 ```bash
 watchlater-remove execute --run-id REMOVAL_PLAN_ID \
@@ -393,10 +357,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
     --remove-label 'Remove from Watch later'
 ```
 
-Headed mode is the default so destructive behavior is visible. `--headless` is available only
-for an already validated setup.
-
-See [`docs/watchlater-removal.md`](docs/watchlater-removal.md).
+Headed mode is the default. See [`docs/watchlater-removal.md`](docs/watchlater-removal.md).
 
 ## 14. Recommended end-to-end sequence
 
@@ -406,47 +367,45 @@ yt-dlp --cookies-from-browser firefox --flat-playlist --dump-single-json \
     'https://www.youtube.com/playlist?list=WL' > watch-later.json
 watchlater import watch-later.json
 
-# repair/recover metadata and perform cheap triage
+# cheap triage / repair
 watchlater enrich --missing-creator
 watchlater recover --unavailable --limit 20
 watchlater creators --remaining
 watchlater keywords --remaining --ngram 2 --min-count 3
 
-# semantic classification/refinement as needed
+# semantic pass as needed
 watchlater-dearrow enrich --all --remaining
 watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20
 
-# human review
+# review
 watchlater-review build review.html
 watchlater-review import watchlater-review-1.json --dry-run
 watchlater-review import watchlater-review-1.json
 
-# execute reviewed/rule-approved moves first (API or browser)
+# optional explicit multi-destination assignment for an already selected cohort
+watchlater-playlist assign --selection 12 \
+    --playlist 'Queue - Electronics' \
+    --playlist 'Reference - Repairs'
+
+# execute all reviewed/rule-approved move destinations first
 watchlater-playlist inventory refresh
 watchlater-playlist plan --backend api
 watchlater-playlist execute --run-id PLAN_ID
 watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
 
-# then build source-removal plan; unconfirmed moves are blocked automatically
+# only fully confirmed moves become source-removal candidates
 watchlater-remove plan
 watchlater-remove execute --run-id REMOVAL_PLAN_ID
-
-# only after reviewing that dry-run
 watchlater-remove execute --run-id REMOVAL_PLAN_ID \
     --apply --confirm-remove --max-deletes 3
 ```
 
 ## 15. Current limitations
 
-- One current `move` decision targets one destination playlist; explicit multi-destination
-  execution is not yet modelled.
-- YouTube UI selectors/text can change without notice; browser execution deliberately fails
-  rather than guessing when identity/menu checks do not match.
-- Browser playlist creation currently relies on YouTube's normal private default for private
-  playlists; non-private creation is attempted only when a recognizable privacy control is
-  present.
-- Transcript escalation uses existing captions only; audio transcription is not performed by
-  default.
+- Saved rules and LLM destination proposals currently express one destination; multiple destinations are an explicit human assignment through `watchlater-playlist assign`.
+- YouTube UI selectors/text can change without notice; browser execution deliberately fails rather than guessing when identity/menu checks do not match.
+- Browser playlist creation relies on YouTube's normal private default for private playlists; non-private creation is attempted only when a recognizable privacy control is present.
+- Transcript escalation uses existing captions only; audio transcription is not performed by default.
 
 ## 16. Detailed documentation
 
@@ -456,7 +415,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
 - [`docs/rich-metadata.md`](docs/rich-metadata.md) — selective descriptions/metadata.
 - [`docs/transcripts.md`](docs/transcripts.md) — caption acquisition/refinement.
 - [`docs/review.md`](docs/review.md) — static HTML human review.
-- [`docs/playlist-sync.md`](docs/playlist-sync.md) — destination planning/API execution.
+- [`docs/playlist-sync.md`](docs/playlist-sync.md) — destination assignment/planning/execution.
 - [`docs/playlist-browser.md`](docs/playlist-browser.md) — destination Playwright execution.
 - [`docs/watchlater-removal.md`](docs/watchlater-removal.md) — selective source removal.
 
