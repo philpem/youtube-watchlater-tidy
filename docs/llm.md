@@ -99,6 +99,31 @@ Rerunning the same command resumes an exact matching incomplete run and skips co
 checkpointed batches; `--refresh` deliberately starts a new run instead. A partial run
 reports its stored progress as `stored_video_count` and `batch_count`.
 
+If a provider content filter is isolated to a single video, the annotator stores an
+explicit `Unclear` fallback tagged `content-filtered` so the run can still complete. Those
+videos can later be retried against a different configured provider without reprocessing the
+rest of the catalogue:
+
+```bash
+watchlater-llm --config watchlater.toml retry-content-filtered \
+    --run-id 4 --provider alternate
+```
+
+Provider profiles include their configured model, but a retry can override only the model
+while keeping the selected endpoint/profile settings:
+
+```bash
+watchlater-llm --config watchlater.toml retry-content-filtered \
+    --run-id 4 --provider openrouter --model anthropic/claude-sonnet-4.5
+```
+
+The retry uses the source run's exact stored evidence and taxonomy, creates a separate
+annotation run with `source_run_id` provenance, and leaves the original filtered fallback
+unchanged for auditability. `--dry-run` shows the exact retry cohort without making provider
+requests; `--no-store`, `--refresh`, `--batch-size`, and `--llm-log` are also supported.
+If the alternate model filters the same video again, the new run records the same transparent
+`content-filtered` fallback rather than failing.
+
 If you do not want to maintain the broad vocabulary manually, an optional discovery pass
 can propose one from an evenly-spaced sample of catalogue metadata and then hold that
 vocabulary fixed for the actual annotation batches:
