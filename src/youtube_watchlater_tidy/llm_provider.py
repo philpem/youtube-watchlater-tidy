@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .llm_config import ProviderConfig
+from .progress import ProgressCallback, ProgressEvent
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,8 @@ def chat(
     json_schema: dict[str, Any] | None = None,
     opener: Callable[..., Any] = urlopen,
     sleeper: Callable[[float], None] = time.sleep,
+    progress: ProgressCallback | None = None,
+    phase: str = "LLM provider",
 ) -> ChatResponse:
     url, headers, payload = build_chat_request(
         provider,
@@ -139,6 +142,7 @@ def chat(
     attempts = provider.retries + 1
     last_error: Exception | None = None
     for attempt in range(attempts):
+        retry_detail: str | None = None
         try:
             with opener(request, timeout=provider.timeout) as response:
                 return _parse_chat_response(response.read(), provider)
@@ -150,22 +154,36 @@ def chat(
                 raise RuntimeError(
                     f"provider {provider.name!r} request failed: {detail}"
                 ) from exc
+            retry_detail = "rate limited" if exc.code == 429 else f"HTTP {exc.code}"
         except URLError as exc:
             last_error = exc
             if attempt + 1 >= attempts:
                 raise RuntimeError(
                     f"provider {provider.name!r} request failed: {exc.reason}"
                 ) from exc
+            retry_detail = f"network error: {exc.reason}"
         except TimeoutError as exc:
             last_error = exc
             if attempt + 1 >= attempts:
                 raise RuntimeError(f"provider {provider.name!r} request timed out") from exc
+            retry_detail = "request timed out"
 
-        sleeper(float(2**attempt))
+        delay = float(2**attempt)
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase=phase,
+                    kind="retry",
+                    detail=(
+                        f"{provider.name}: {retry_detail}; "
+                        f"retry {attempt + 2}/{attempts} in {delay:g}s"
+                    ),
+                )
+            )
+        sleeper(delay)
 
     assert last_error is not None
     raise RuntimeError(f"provider {provider.name!r} request failed: {last_error}")
-
 
 def parse_json_content(response: ChatResponse, provider_name: str) -> dict[str, Any]:
     try:

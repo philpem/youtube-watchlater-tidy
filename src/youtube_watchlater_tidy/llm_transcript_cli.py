@@ -9,6 +9,7 @@ from .db import open_catalogue
 from .llm_classification import classify, evidence_hash
 from .llm_config import load_project_config
 from .llm_prompt import render_prompt
+from .progress import ConsoleProgress, add_progress_argument, selected_progress_mode
 from .llm_store import (
     cached_run_id,
     classification_cache_key,
@@ -58,6 +59,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show transcript refinement evidence without calling the provider",
     )
+    add_progress_argument(parser, include_no_progress=True)
     return parser
 
 
@@ -163,13 +165,16 @@ def _run(args: argparse.Namespace) -> int:
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    result = classify(
-        provider,
-        prompt,
-        videos,
-        playlists=set(config.playlists),
-        batch_size=args.batch_size,
-    )
+    with ConsoleProgress(selected_progress_mode(args)) as progress:
+        result = classify(
+            provider,
+            prompt,
+            videos,
+            playlists=set(config.playlists),
+            batch_size=args.batch_size,
+            progress=progress,
+            phase="LLM transcript refinement",
+        )
 
     if args.no_store:
         output = _ephemeral_payload(provider, prompt, videos, result)

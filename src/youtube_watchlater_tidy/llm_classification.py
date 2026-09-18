@@ -10,6 +10,7 @@ from typing import Any
 from .llm_config import ProviderConfig
 from .llm_prompt import ACTIONS, CLASSIFICATION_SCHEMA, RenderedPrompt
 from .llm_provider import ChatResponse, chat, parse_json_content
+from .progress import ProgressCallback, ProgressEvent
 from .reports import latest_snapshot_id
 
 UNAVAILABLE_TITLES = {"[private video]", "[deleted video]"}
@@ -433,11 +434,16 @@ def _classify_batch(
     prompt: RenderedPrompt,
     videos: list[ClassificationEvidence],
     playlists: set[str],
+    progress: ProgressCallback | None,
+    phase: str,
 ) -> ClassificationBatchResult:
+    chat_kwargs: dict[str, Any] = {"json_schema": CLASSIFICATION_SCHEMA}
+    if progress is not None:
+        chat_kwargs.update({"progress": progress, "phase": phase})
     response: ChatResponse = chat(
         provider,
         build_messages(prompt, videos),
-        json_schema=CLASSIFICATION_SCHEMA,
+        **chat_kwargs,
     )
     value = parse_json_content(response, provider.name)
     suggestions = validate_response(
@@ -460,22 +466,72 @@ def classify(
     *,
     playlists: set[str],
     batch_size: int = 10,
+    progress: ProgressCallback | None = None,
+    phase: str = "LLM classification",
 ) -> ClassificationRunResult:
     batches = _batches(videos, batch_size)
     if not batches:
         return ClassificationRunResult(suggestions=(), batches=())
 
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="start",
+                completed=0,
+                total=len(videos),
+                unit="video",
+                detail=f"{len(batches)} batch(es)",
+            )
+        )
+
     results: dict[int, ClassificationBatchResult] = {}
+    completed_videos = 0
+    completed_batches = 0
     with ThreadPoolExecutor(max_workers=provider.concurrency) as executor:
         futures = {
-            executor.submit(_classify_batch, provider, prompt, batch, playlists): index
+            executor.submit(
+                _classify_batch,
+                provider,
+                prompt,
+                batch,
+                playlists,
+                progress,
+                phase,
+            ): index
             for index, batch in enumerate(batches)
         }
         for future in as_completed(futures):
-            results[futures[future]] = future.result()
+            index = futures[future]
+            result = future.result()
+            results[index] = result
+            completed_videos += len(result.suggestions)
+            completed_batches += 1
+            if progress is not None:
+                progress(
+                    ProgressEvent(
+                        phase=phase,
+                        kind="update",
+                        completed=completed_videos,
+                        total=len(videos),
+                        unit="video",
+                        detail=f"batch {completed_batches}/{len(batches)}",
+                    )
+                )
 
     ordered_batches = tuple(results[index] for index in range(len(batches)))
     suggestions = tuple(
         suggestion for batch in ordered_batches for suggestion in batch.suggestions
     )
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="finish",
+                completed=len(suggestions),
+                total=len(videos),
+                unit="video",
+                detail=f"{len(batches)} batch(es) complete",
+            )
+        )
     return ClassificationRunResult(suggestions=suggestions, batches=ordered_batches)

@@ -17,6 +17,7 @@ from .recovery import (
     latest_archive_lookup,
     recover_with_findyoutubevideo,
 )
+from .progress import add_progress_argument, progress_enabled, selected_progress_mode
 from .recovery_targets import recovery_candidate_video_ids
 from .reports import (
     creator_rows,
@@ -158,10 +159,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show video ids that would be enriched without making network requests",
     )
+    add_progress_argument(enrich_parser)
     enrich_parser.add_argument(
         "--no-progress",
         action="store_true",
-        help="disable the tqdm progress bar",
+        help="compatibility alias for --progress never",
     )
 
     recover_parser = subparsers.add_parser(
@@ -219,10 +221,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=90.0,
         help="per-video HTTP timeout in seconds (default: 90)",
     )
+    add_progress_argument(recover_parser)
     recover_parser.add_argument(
         "--no-progress",
         action="store_true",
-        help="disable the tqdm progress bar",
+        help="compatibility alias for --progress never",
     )
 
     recovery_parser = subparsers.add_parser(
@@ -406,7 +409,7 @@ def _cmd_enrich(args: argparse.Namespace) -> int:
             conn,
             video_ids,
             yt_dlp=args.yt_dlp,
-            show_progress=not args.no_progress,
+            show_progress=progress_enabled(selected_progress_mode(args)),
         )
 
     print(
@@ -491,7 +494,7 @@ def _cmd_recover(args: argparse.Namespace) -> int:
             video_ids,
             base_url=args.base_url,
             timeout=args.timeout,
-            show_progress=not args.no_progress,
+            show_progress=progress_enabled(selected_progress_mode(args)),
         )
 
         single_row = None

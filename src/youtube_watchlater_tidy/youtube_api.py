@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from .multi_destination import current_move_authorizes_destination
 from .multi_destination_support import plan_payload
+from .progress import ProgressCallback, ProgressEvent
 from .playlist_sync import (
     INVENTORY_FORMAT,
     ensure_playlist_sync_schema,
@@ -409,6 +410,8 @@ def execute_api_plan(
     apply: bool = False,
     allow_over_quota: bool = False,
     max_writes: int | None = None,
+    progress: ProgressCallback | None = None,
+    phase: str = "Playlist sync (API)",
 ) -> ApiExecutionResult:
     ensure_playlist_sync_schema(conn)
     if max_writes is not None and max_writes < 0:
@@ -456,6 +459,8 @@ def execute_api_plan(
     if client is None:
         raise ValueError("an authenticated YouTube API client is required with --apply")
 
+    if progress is not None:
+        progress(ProgressEvent(phase=phase, kind="status", detail="loading live playlists"))
     by_id, by_title = _live_playlists_by_id_and_title(client)
     writes = created = inserted = live_present = failed = stale_runtime = 0
     stopped_for_cap = False
@@ -478,9 +483,46 @@ def execute_api_plan(
         (run_id,),
     ).fetchall()
 
+    completed_items = 0
+
+    def mark_processed(detail: str | None = None) -> None:
+        nonlocal completed_items
+        completed_items += 1
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase=phase,
+                    kind="update",
+                    completed=completed_items,
+                    total=len(items),
+                    unit="item",
+                    detail=detail,
+                    counters={
+                        "created": created,
+                        "inserted": inserted,
+                        "present": live_present,
+                        "failed": failed,
+                        "stale": stale_runtime,
+                    },
+                )
+            )
+
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="start",
+                completed=0,
+                total=len(items),
+                unit="item",
+                detail=f"run {run_id}",
+            )
+        )
+
     for item in items:
         if not _current_decision_matches(conn, run, item):
             stale_runtime += 1
+            mark_processed("stale decision")
             continue
 
         destination = conn.execute(
@@ -543,6 +585,7 @@ def execute_api_plan(
 
             if not _current_decision_matches(conn, run, item):
                 stale_runtime += 1
+                mark_processed("stale decision")
                 continue
 
             existing = client.find_playlist_item(playlist_id, str(item["video_id"]))
@@ -558,6 +601,7 @@ def execute_api_plan(
                     raw=existing,
                     video_id=str(item["video_id"]),
                 )
+                mark_processed("already present")
                 continue
 
             if not can_write():
@@ -587,12 +631,24 @@ def execute_api_plan(
                 error=str(exc),
                 video_id=str(item["video_id"]),
             )
+        mark_processed(str(item["video_id"]))
 
     status, remaining = _finish_run(conn, run_id)
     if stopped_for_cap and status == "complete":
         status = "partial"
         with conn:
             conn.execute("UPDATE playlist_sync_runs SET status = 'partial' WHERE id = ?", (run_id,))
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="finish",
+                completed=completed_items,
+                total=len(items),
+                unit="item",
+                detail=f"status={status} remaining={remaining}",
+            )
+        )
     return ApiExecutionResult(
         run_id=run_id,
         applied=True,

@@ -252,6 +252,7 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
     def test_batch_client_removes_loaded_matches_in_one_scan(self) -> None:
         fake = FakeBatchBrowser(["video00000C", "unplanned001", "video00000A"])
         progress: list[str] = []
+        events = []
         with open_catalogue(self.db_path) as conn:
             result = execute_removal_plan(
                 conn,
@@ -263,6 +264,7 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
                 interval=0,
                 backoff=0,
                 progress=progress.append,
+                progress_events=events.append,
             )
             payload = removal_plan_payload(conn, self.plan.run_id)
 
@@ -274,6 +276,10 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
         statuses = {row["video_id"]: row["status"] for row in payload["items"]}
         self.assertEqual(statuses["video00000B"], "already_absent")
         self.assertTrue(any("checkpoint saved" in line for line in progress))
+        self.assertEqual(events[0].kind, "start")
+        self.assertEqual(events[0].total, 3)
+        self.assertEqual(events[-1].kind, "finish")
+        self.assertEqual(events[-1].completed, 3)
 
     def test_incomplete_batch_scan_leaves_unseen_items_retriable(self) -> None:
         fake = FakeBatchBrowser(["video00000A"], complete=False)

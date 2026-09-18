@@ -224,7 +224,7 @@ Telecoms = "Telephony, radio, networking and modems."
             ),
         ]
 
-        def fake_chat(provider, messages, json_schema=None):
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
             batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
             video_id = batch[0]["video_id"]
             payload = {
@@ -246,14 +246,27 @@ Telecoms = "Telephony, radio, networking and modems."
                 raw={},
             )
 
+        events = []
         with patch("youtube_watchlater_tidy.llm_annotation.chat", side_effect=fake_chat):
-            result = annotate(self.provider, self.prompt, videos, batch_size=1)
+            result = annotate(
+                self.provider,
+                self.prompt,
+                videos,
+                batch_size=1,
+                progress=events.append,
+            )
 
         self.assertEqual(
             [item.video_id for item in result.annotations],
             ["video00000A", "video00000E"],
         )
         self.assertEqual(len(result.batches), 2)
+        self.assertEqual(events[0].kind, "start")
+        self.assertEqual(events[-1].kind, "finish")
+        self.assertEqual(
+            [event.completed for event in events if event.kind == "update"],
+            [1, 2],
+        )
 
     def test_taxonomy_discovery_adds_reserved_categories(self) -> None:
         with open_catalogue(self.db_path) as conn:
@@ -263,7 +276,7 @@ Telecoms = "Telephony, radio, networking and modems."
                 include_decided=True,
             )
 
-        def fake_chat(provider, messages, json_schema=None):
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
             return ChatResponse(
                 content=json.dumps(
                     {

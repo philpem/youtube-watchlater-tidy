@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .db import open_catalogue
+from .progress import add_progress_argument, progress_enabled, selected_progress_mode
 from .dearrow import (
     DEFAULT_DEARROW_BASE,
     candidate_video_ids,
@@ -63,6 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     enrich.add_argument("--timeout", type=float, default=15.0)
     enrich.add_argument("--workers", type=int, default=4)
     enrich.add_argument("--dry-run", action="store_true")
+    add_progress_argument(enrich)
     enrich.add_argument("--no-progress", action="store_true")
 
     show = sub.add_parser("show", help="show the latest cached DeArrow lookup")
@@ -101,7 +103,7 @@ def _cmd_enrich(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             hash_prefix=args.hash_prefix,
             workers=args.workers,
-            show_progress=not args.no_progress,
+            show_progress=progress_enabled(selected_progress_mode(args)),
         )
 
     print(

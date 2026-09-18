@@ -11,6 +11,7 @@ from .llm_classification import ClassificationEvidence, evidence_hash
 from .llm_config import ProjectConfig, ProviderConfig
 from .llm_prompt import render_prompt
 from .llm_provider import ChatResponse, chat, parse_json_content
+from .progress import ProgressCallback, ProgressEvent
 
 
 RESERVED_CATEGORIES = {
@@ -384,11 +385,16 @@ def _annotate_batch(
     provider: ProviderConfig,
     prompt: AnnotationPrompt,
     videos: list[ClassificationEvidence],
+    progress: ProgressCallback | None,
+    phase: str,
 ) -> AnnotationBatchResult:
+    chat_kwargs: dict[str, Any] = {"json_schema": prompt.schema()}
+    if progress is not None:
+        chat_kwargs.update({"progress": progress, "phase": phase})
     response: ChatResponse = chat(
         provider,
         build_annotation_messages(prompt, videos),
-        json_schema=prompt.schema(),
+        **chat_kwargs,
     )
     value = parse_json_content(response, provider.name)
     annotations = validate_annotation_response(
@@ -410,24 +416,73 @@ def annotate(
     videos: list[ClassificationEvidence],
     *,
     batch_size: int = 10,
+    progress: ProgressCallback | None = None,
+    phase: str = "LLM annotation",
 ) -> AnnotationRunResult:
     batches = _batches(videos, batch_size)
     if not batches:
         return AnnotationRunResult(annotations=(), batches=())
 
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="start",
+                completed=0,
+                total=len(videos),
+                unit="video",
+                detail=f"{len(batches)} batch(es)",
+            )
+        )
+
     results: dict[int, AnnotationBatchResult] = {}
+    completed_videos = 0
+    completed_batches = 0
     with ThreadPoolExecutor(max_workers=provider.concurrency) as executor:
         futures = {
-            executor.submit(_annotate_batch, provider, prompt, batch): index
+            executor.submit(
+                _annotate_batch,
+                provider,
+                prompt,
+                batch,
+                progress,
+                phase,
+            ): index
             for index, batch in enumerate(batches)
         }
         for future in as_completed(futures):
-            results[futures[future]] = future.result()
+            index = futures[future]
+            result = future.result()
+            results[index] = result
+            completed_videos += len(result.annotations)
+            completed_batches += 1
+            if progress is not None:
+                progress(
+                    ProgressEvent(
+                        phase=phase,
+                        kind="update",
+                        completed=completed_videos,
+                        total=len(videos),
+                        unit="video",
+                        detail=f"batch {completed_batches}/{len(batches)}",
+                    )
+                )
 
     ordered_batches = tuple(results[index] for index in range(len(batches)))
     annotations = tuple(
         annotation for batch in ordered_batches for annotation in batch.annotations
     )
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="finish",
+                completed=len(annotations),
+                total=len(videos),
+                unit="video",
+                detail=f"{len(batches)} batch(es) complete",
+            )
+        )
     return AnnotationRunResult(annotations=annotations, batches=ordered_batches)
 
 
@@ -465,11 +520,25 @@ def discover_taxonomy(
     *,
     interest_brief: str = "",
     max_categories: int = 20,
+    progress: ProgressCallback | None = None,
+    phase: str = "LLM taxonomy discovery",
 ) -> TaxonomyDiscovery:
     if not videos:
         raise ValueError("cannot discover a taxonomy from an empty video set")
     if not 3 <= max_categories <= 30:
         raise ValueError("--max-categories must be between 3 and 30")
+
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="start",
+                completed=0,
+                total=1,
+                unit="request",
+                detail=f"{len(videos)} sampled video(s)",
+            )
+        )
 
     prompt_hash = _canonical_hash(
         {
@@ -500,6 +569,7 @@ def discover_taxonomy(
             },
         ],
         json_schema=TAXONOMY_SCHEMA,
+        **({"progress": progress, "phase": phase} if progress is not None else {}),
     )
     value = parse_json_content(response, provider.name)
     if set(value) != {"categories"} or not isinstance(value.get("categories"), list):
@@ -525,6 +595,17 @@ def discover_taxonomy(
     if len(categories) > max_categories:
         raise ValueError(
             f"taxonomy discovery returned {len(categories)} categories; maximum is {max_categories}"
+        )
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="finish",
+                completed=1,
+                total=1,
+                unit="request",
+                detail=f"{len(categories)} category/categories discovered",
+            )
         )
     return TaxonomyDiscovery(
         categories=with_reserved_categories(categories),

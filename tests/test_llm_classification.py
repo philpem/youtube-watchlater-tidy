@@ -212,7 +212,7 @@ class LLMClassificationTests(unittest.TestCase):
             sha256="prompt-hash",
         )
 
-        def fake_chat(provider, messages, json_schema=None):
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
             batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
             video_id = batch[0]["video_id"]
             payload = {"classifications": [self._valid(video_id)]}
@@ -223,6 +223,7 @@ class LLMClassificationTests(unittest.TestCase):
                 raw={},
             )
 
+        events = []
         with patch("youtube_watchlater_tidy.llm_classification.chat", side_effect=fake_chat):
             result = classify(
                 provider,
@@ -230,6 +231,7 @@ class LLMClassificationTests(unittest.TestCase):
                 videos,
                 playlists={"Queue - Retrocomputing"},
                 batch_size=1,
+                progress=events.append,
             )
         self.assertEqual(
             [item.video_id for item in result.suggestions],
@@ -237,6 +239,12 @@ class LLMClassificationTests(unittest.TestCase):
         )
         self.assertEqual(len(result.batches), 2)
         self.assertTrue(all(batch.input_sha256 for batch in result.batches))
+        self.assertEqual(events[0].kind, "start")
+        self.assertEqual(events[0].total, 2)
+        self.assertEqual(events[-1].kind, "finish")
+        self.assertEqual(events[-1].completed, 2)
+        updates = [event for event in events if event.kind == "update"]
+        self.assertEqual([event.completed for event in updates], [1, 2])
 
 
 if __name__ == "__main__":
