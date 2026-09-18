@@ -442,6 +442,33 @@ def _annotation_ephemeral_payload(provider, prompt, videos, result, taxonomy_sou
     }
 
 
+def _print_stored_run_summary(
+    output: dict,
+    *,
+    kind: str,
+    results_command: str,
+) -> None:
+    run_id = output["run_id"]
+    status = output.get("status", "unknown")
+    video_count = int(output.get("stored_video_count", output.get("video_count", 0)))
+    batch_count = int(output.get("batch_count", len(output.get("batches", ()))))
+    cache = output.get("cache")
+    details = [f"{video_count} video(s)", f"{batch_count} batch(es)"]
+    if cache:
+        details.append(f"cache={cache}")
+    source_run_id = output.get("source_run_id")
+    if source_run_id is not None:
+        details.append(f"source_run={source_run_id}")
+    missing = output.get("missing_description_video_ids")
+    if isinstance(missing, list) and missing:
+        details.append(f"{len(missing)} description(s) still missing")
+    print(
+        f"{kind} run {run_id}: {status}; "
+        + ", ".join(details)
+        + f". Full results: {results_command} --run-id {run_id}"
+    )
+
+
 def _cmd_annotate(args: argparse.Namespace) -> int:
     if args.refresh and args.no_store:
         raise ValueError("--refresh is meaningless with --no-store")
@@ -606,7 +633,11 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             if cached is not None:
                 output = annotation_run_payload(conn, cached)
                 output["cache"] = "hit"
-                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                _print_stored_run_summary(
+                    output,
+                    kind="Annotation",
+                    results_command="watchlater-llm annotation-results",
+                )
                 return 0
 
             reusable = reusable_annotation_run_id(
@@ -619,9 +650,11 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             if reusable is not None:
                 output = annotation_run_payload(conn, reusable)
                 output["cache"] = "semantic-hit"
-                output["requested_provider"] = provider.name
-                output["requested_model"] = provider.model
-                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                _print_stored_run_summary(
+                    output,
+                    kind="Annotation",
+                    results_command="watchlater-llm annotation-results",
+                )
                 return 0
 
             partial = incomplete_annotation_run_id(
@@ -765,7 +798,11 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
         if args.refresh
         else "miss"
     )
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    _print_stored_run_summary(
+        output,
+        kind="Annotation",
+        results_command="watchlater-llm annotation-results",
+    )
     return 0
 
 
@@ -827,7 +864,11 @@ def _cmd_classify(args: argparse.Namespace) -> int:
             if cached is not None:
                 output = run_payload(conn, cached)
                 output["cache"] = "hit"
-                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                _print_stored_run_summary(
+                    output,
+                    kind="Classification",
+                    results_command="watchlater-llm results",
+                )
                 return 0
 
     if not videos:
@@ -883,7 +924,11 @@ def _cmd_classify(args: argparse.Namespace) -> int:
         )
         output = run_payload(conn, run_id)
     output["cache"] = "refresh" if args.refresh else "miss"
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    _print_stored_run_summary(
+        output,
+        kind="Classification",
+        results_command="watchlater-llm results",
+    )
     return 0
 
 
@@ -948,7 +993,11 @@ def _cmd_retry_content_filtered(args: argparse.Namespace) -> int:
                 output = annotation_run_payload(conn, cached)
                 output["cache"] = "hit"
                 output["source_run_id"] = target.source_run_id
-                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                _print_stored_run_summary(
+                    output,
+                    kind="Content-filter retry",
+                    results_command="watchlater-llm annotation-results",
+                )
                 return 0
 
             partial = incomplete_annotation_run_id(
@@ -1068,7 +1117,11 @@ def _cmd_retry_content_filtered(args: argparse.Namespace) -> int:
 
     output["cache"] = "resume" if resumed else "refresh" if args.refresh else "miss"
     output["source_run_id"] = target.source_run_id
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    _print_stored_run_summary(
+        output,
+        kind="Content-filter retry",
+        results_command="watchlater-llm annotation-results",
+    )
     return 0
 
 
@@ -1111,7 +1164,11 @@ def _cmd_refine_description(args: argparse.Namespace) -> int:
                 output["missing_description_video_ids"] = list(
                     target.missing_description_video_ids
                 )
-                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                _print_stored_run_summary(
+                    output,
+                    kind="Description refinement",
+                    results_command="watchlater-llm results",
+                )
                 return 0
 
     if not videos:
@@ -1188,7 +1245,11 @@ def _cmd_refine_description(args: argparse.Namespace) -> int:
         output = run_payload(conn, run_id)
     output["cache"] = "refresh" if args.refresh else "miss"
     output["missing_description_video_ids"] = list(target.missing_description_video_ids)
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    _print_stored_run_summary(
+        output,
+        kind="Description refinement",
+        results_command="watchlater-llm results",
+    )
     return 0
 
 
