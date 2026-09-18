@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -1181,6 +1184,87 @@ Telecoms = "Telephony, radio, networking and modems."
 
         self.assertEqual(coalesced.copied_batches, 0)
         self.assertEqual(completed, {0})
+
+    @unittest.skipUnless(hasattr(signal, "SIGINT"), "SIGINT is required")
+    def test_checkpointed_annotation_drains_inflight_batches_on_first_sigint(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=3,
+            )
+
+        provider = ProviderConfig(
+            name="test",
+            preset="generic",
+            base_url="https://example.invalid/v1",
+            model="model-a",
+            concurrency=2,
+        )
+        both_started = threading.Event()
+        drain_reported = threading.Event()
+        lock = threading.Lock()
+        requested: list[str] = []
+        checkpointed: list[int] = []
+        events = []
+
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
+            batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
+            video_id = batch[0]["video_id"]
+            with lock:
+                requested.append(video_id)
+                if len(requested) == 2:
+                    both_started.set()
+            self.assertTrue(both_started.wait(1.0))
+            if video_id == videos[0].video_id:
+                os.kill(os.getpid(), signal.SIGINT)
+            self.assertTrue(drain_reported.wait(1.0))
+            return ChatResponse(
+                content=json.dumps(
+                    {
+                        "annotations": [
+                            {
+                                "video_id": video_id,
+                                "primary_category": "Retrocomputing",
+                                "subject": "subject",
+                                "tags": ["retrocomputing"],
+                                "content_type": "technical",
+                                "confidence": 0.8,
+                            }
+                        ]
+                    }
+                ),
+                usage={},
+                model="model-a",
+                raw={},
+                finish_reason="stop",
+            )
+
+        def progress(event):
+            events.append(event)
+            if "interrupt received" in (event.detail or ""):
+                drain_reported.set()
+
+        with patch("youtube_watchlater_tidy.llm_annotation.chat", side_effect=fake_chat):
+            with self.assertRaises(KeyboardInterrupt):
+                annotate(
+                    provider,
+                    self.prompt,
+                    videos,
+                    batch_size=1,
+                    on_batch=lambda index, batch, batch_result: checkpointed.append(index),
+                    progress=progress,
+                )
+
+        self.assertEqual(set(requested), {videos[0].video_id, videos[1].video_id})
+        self.assertEqual(set(checkpointed), {0, 1})
+        self.assertTrue(
+            any(
+                "queued request(s) will not start" in (event.detail or "")
+                for event in events
+            )
+        )
 
     def test_annotation_resume_skips_checkpointed_batches(self) -> None:
         videos = [
