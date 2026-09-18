@@ -580,7 +580,7 @@ Telecoms = "Telephony, radio, networking and modems."
             resumable = incomplete_annotation_run_id(
                 conn,
                 snapshot_id=self.snapshot,
-                provider_sha256=provider_sha,
+                requested_model=self.provider.model,
                 prompt_sha256=self.prompt.sha256,
                 input_sha256=input_sha,
                 videos=videos,
@@ -622,6 +622,97 @@ Telecoms = "Telephony, radio, networking and modems."
 
         self.assertEqual(payload["status"], "complete")
         self.assertEqual(len(payload["annotations"]), 2)
+
+    def test_incomplete_resume_ignores_execution_only_provider_changes(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=2,
+            )
+            run_id = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"scope": "all", "batch_size": 1},
+            )
+            first = AnnotationBatchResult(
+                annotations=(self._annotation(videos[0].video_id),),
+                input_sha256=evidence_hash([videos[0]]),
+                usage={},
+                response_model=self.provider.model,
+            )
+            store_annotation_batch(
+                conn,
+                run_id=run_id,
+                batch_index=0,
+                videos=[videos[0]],
+                result=first,
+            )
+
+            changed_execution = ProviderConfig(
+                name=self.provider.name,
+                preset=self.provider.preset,
+                base_url=self.provider.base_url,
+                model=self.provider.model,
+                concurrency=self.provider.concurrency,
+                max_tokens=self.provider.max_tokens * 2,
+                stream=not self.provider.stream,
+                structured_mode=self.provider.structured_mode,
+            )
+            _provider_sha, input_sha, _cache_key = annotation_cache_key(
+                changed_execution,
+                self.prompt,
+                videos,
+            )
+            resumed = incomplete_annotation_run_id(
+                conn,
+                snapshot_id=self.snapshot,
+                requested_model=changed_execution.model,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+            )
+
+        self.assertEqual(resumed, run_id)
+
+    def test_incomplete_resume_rejects_different_model(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=1,
+            )
+            run_id = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+            )
+            _provider_sha, input_sha, _cache_key = annotation_cache_key(
+                self.provider,
+                self.prompt,
+                videos,
+            )
+            resumed = incomplete_annotation_run_id(
+                conn,
+                snapshot_id=self.snapshot,
+                requested_model="different-model",
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+            )
+
+        self.assertIsNone(resumed)
 
     def test_annotation_resume_skips_checkpointed_batches(self) -> None:
         videos = [
