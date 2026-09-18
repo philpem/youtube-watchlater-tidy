@@ -506,12 +506,38 @@ def annotate(
         batch: list[ClassificationEvidence],
         response: ChatResponse,
     ) -> AnnotationBatchResult:
-        if response.finish_reason == "length":
+        if response.finish_reason in {"length", "content_filter"}:
             if len(batch) == 1:
-                error = RuntimeError(
-                    f"provider {provider.name!r} truncated a single-video annotation "
-                    f"response at max_tokens={provider.max_tokens}; increase "
-                    f"providers.{provider.name}.max_tokens or reduce the requested output"
+                if response.finish_reason == "length":
+                    error = RuntimeError(
+                        f"provider {provider.name!r} truncated a single-video annotation "
+                        f"response at max_tokens={provider.max_tokens}; increase "
+                        f"providers.{provider.name}.max_tokens or reduce the requested output"
+                    )
+                    if progress is not None:
+                        progress(
+                            ProgressEvent(
+                                phase=phase,
+                                kind="message",
+                                completed=completed_videos,
+                                total=len(videos),
+                                unit="video",
+                                detail=f"{label} response failed validation: {error}",
+                            )
+                        )
+                    raise error
+
+                video = batch[0]
+                fallback = SemanticAnnotation(
+                    video_id=video.video_id,
+                    primary_category="Unclear",
+                    subject=(
+                        "Provider content filter prevented semantic annotation; "
+                        "manual review required"
+                    ),
+                    tags=("content-filtered",),
+                    content_type="unclassified",
+                    confidence=0.0,
                 )
                 if progress is not None:
                     progress(
@@ -521,14 +547,27 @@ def annotate(
                             completed=completed_videos,
                             total=len(videos),
                             unit="video",
-                            detail=f"{label} response failed validation: {error}",
+                            detail=(
+                                f"{label} hit provider content filter for {video.video_id}; "
+                                "recording Unclear fallback for manual review"
+                            ),
                         )
                     )
-                raise error
+                return AnnotationBatchResult(
+                    annotations=(fallback,),
+                    input_sha256=evidence_hash(batch),
+                    usage=response.usage,
+                    response_model=response.model,
+                )
 
             split_at = (len(batch) + 1) // 2
             left_batch = batch[:split_at]
             right_batch = batch[split_at:]
+            limit_reason = (
+                "provider output limit"
+                if response.finish_reason == "length"
+                else "provider content filter"
+            )
             if progress is not None:
                 progress(
                     ProgressEvent(
@@ -538,7 +577,7 @@ def annotate(
                         total=len(videos),
                         unit="video",
                         detail=(
-                            f"{label} hit provider output limit; retrying {len(batch)} "
+                            f"{label} hit {limit_reason}; retrying {len(batch)} "
                             f"videos as {len(left_batch)} + {len(right_batch)}"
                         ),
                     )
