@@ -384,6 +384,7 @@ def chat(
                 secrets=diagnostic_secrets,
             )
         attempt_started = time.monotonic()
+        raw_body = ""
         try:
             with opener(request, timeout=provider.timeout) as response:
                 headers_received_seconds = time.monotonic() - attempt_started
@@ -433,7 +434,7 @@ def chat(
                                 "stream": provider.stream,
                                 "headers_received_seconds": headers_received_seconds,
                                 "total_seconds": time.monotonic() - attempt_started,
-                                "raw_body": locals().get("raw_body", ""),
+                                "raw_body": raw_body,
                                 "parse_error": f"{type(exc).__name__}: {exc}",
                             },
                             secrets=diagnostic_secrets,
