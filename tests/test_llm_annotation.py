@@ -14,6 +14,7 @@ from youtube_watchlater_tidy.llm_annotation import (
     AnnotationPrompt,
     AnnotationRunResult,
     SemanticAnnotation,
+    TaxonomyDiscovery,
     annotate,
     discover_taxonomy,
     render_annotation_prompt,
@@ -31,6 +32,12 @@ from youtube_watchlater_tidy.llm_classification import (
 )
 from youtube_watchlater_tidy.llm_config import ProviderConfig, load_project_config
 from youtube_watchlater_tidy.llm_provider import ChatResponse
+from youtube_watchlater_tidy.llm_taxonomy_store import (
+    store_taxonomy,
+    taxonomy_categories,
+    taxonomy_list_payload,
+    taxonomy_payload,
+)
 from youtube_watchlater_tidy.triage import apply_selection_action, select_title
 
 
@@ -308,6 +315,50 @@ Telecoms = "Telephony, radio, networking and modems."
         self.assertIn("Unclear", result.categories)
         self.assertTrue(result.input_sha256)
         self.assertTrue(result.prompt_sha256)
+
+    def test_discovered_taxonomy_store_round_trip(self) -> None:
+        discovery = TaxonomyDiscovery(
+            categories=self.categories,
+            input_sha256="taxonomy-input",
+            prompt_sha256="taxonomy-prompt",
+            usage={"prompt_tokens": 20},
+            response_model="model-a",
+        )
+        with open_catalogue(self.db_path) as conn:
+            taxonomy_id = store_taxonomy(
+                conn,
+                snapshot_id=self.snapshot,
+                selection_id=None,
+                provider=self.provider,
+                discovery=discovery,
+                sample_count=250,
+                max_categories=20,
+                interest_profile="default",
+            )
+            payload = taxonomy_payload(conn, taxonomy_id)
+            categories = taxonomy_categories(conn, taxonomy_id)
+            listing = taxonomy_list_payload(conn, snapshot_id=self.snapshot)
+
+        self.assertEqual(payload["taxonomy_id"], taxonomy_id)
+        self.assertEqual(payload["snapshot_id"], self.snapshot)
+        self.assertEqual(payload["sample_count"], 250)
+        self.assertEqual(payload["max_categories"], 20)
+        self.assertEqual(payload["categories"], self.categories)
+        self.assertEqual(categories, self.categories)
+        self.assertEqual(listing[0]["taxonomy_id"], taxonomy_id)
+        self.assertEqual(listing[0]["category_count"], len(self.categories))
+
+    def test_schema_v8_migrates_saved_taxonomy_table(self) -> None:
+        path = self.root / "v8.sqlite3"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA user_version = 8")
+        ensure_schema(conn)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        conn.close()
+        self.assertEqual(version, SCHEMA_VERSION)
+        self.assertIn("llm_taxonomies", tables)
 
     def test_annotation_store_is_cached_and_does_not_create_decisions(self) -> None:
         with open_catalogue(self.db_path) as conn:

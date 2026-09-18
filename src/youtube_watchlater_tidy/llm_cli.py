@@ -37,6 +37,12 @@ from .progress import (
     add_progress_argument,
     selected_progress_mode,
 )
+from .llm_taxonomy_store import (
+    store_taxonomy,
+    taxonomy_categories,
+    taxonomy_list_payload,
+    taxonomy_payload,
+)
 from .llm_store import (
     cached_run_id,
     classification_cache_key,
@@ -136,9 +142,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     annotate_parser.add_argument(
         "--taxonomy",
-        choices=("configured", "discover"),
+        choices=("configured", "discover", "saved"),
         default="configured",
-        help="use configured review categories or discover a vocabulary from catalogue metadata",
+        help="use configured categories, discover a vocabulary, or reuse a saved taxonomy",
+    )
+    annotate_parser.add_argument(
+        "--taxonomy-id",
+        type=int,
+        help="saved taxonomy ID to use with --taxonomy saved",
     )
     annotate_parser.add_argument(
         "--taxonomy-sample",
@@ -168,6 +179,18 @@ def _parser() -> argparse.ArgumentParser:
         help="show annotation evidence/taxonomy inputs without making provider requests",
     )
     add_progress_argument(annotate_parser, include_no_progress=True)
+
+    taxonomies = sub.add_parser(
+        "taxonomies",
+        help="list saved discovered taxonomies",
+    )
+    taxonomies.add_argument("--snapshot", type=int)
+
+    taxonomy = sub.add_parser(
+        "taxonomy",
+        help="show one saved discovered taxonomy",
+    )
+    taxonomy.add_argument("--taxonomy-id", type=int, required=True)
 
     annotation_results = sub.add_parser(
         "annotation-results",
@@ -357,6 +380,10 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
         raise ValueError("--taxonomy-sample must be at least 1")
     if not 3 <= args.max_categories <= 30:
         raise ValueError("--max-categories must be between 3 and 30")
+    if args.taxonomy == "saved" and args.taxonomy_id is None:
+        raise ValueError("--taxonomy saved requires --taxonomy-id")
+    if args.taxonomy != "saved" and args.taxonomy_id is not None:
+        raise ValueError("--taxonomy-id is only valid with --taxonomy saved")
 
     config = load_project_config(args.config)
     provider = config.provider(args.provider)
@@ -376,7 +403,9 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             include_decided=args.scope == "all",
         )
 
-        taxonomy_context = {}
+        taxonomy_context: dict[str, object] = {"taxonomy_mode": args.taxonomy}
+        annotation_taxonomy_source = "configured"
+
         if args.taxonomy == "configured":
             if not config.review_categories:
                 raise ValueError(
@@ -384,6 +413,23 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                     "or pass --taxonomy discover"
                 )
             categories = config.review_categories
+
+        elif args.taxonomy == "saved":
+            assert args.taxonomy_id is not None
+            saved = taxonomy_payload(conn, args.taxonomy_id)
+            categories = taxonomy_categories(conn, args.taxonomy_id)
+            annotation_taxonomy_source = "discover"
+            taxonomy_context.update(
+                {
+                    "taxonomy_id": args.taxonomy_id,
+                    "taxonomy_origin_snapshot_id": saved["snapshot_id"],
+                    "taxonomy_origin_selection_id": saved["selection_id"],
+                    "taxonomy_origin_provider": saved["provider"],
+                    "taxonomy_origin_model": saved["configured_model"],
+                    "taxonomy_sample_count": saved["sample_count"],
+                }
+            )
+
         elif args.dry_run:
             sample = even_sample(videos, args.taxonomy_sample) if videos else []
             output = {
@@ -393,6 +439,7 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 "selection_id": args.selection,
                 "scope": args.scope,
                 "taxonomy_source": "discover",
+                "taxonomy_mode": "discover",
                 "taxonomy_pending": True,
                 "taxonomy_sample_count": len(sample),
                 "taxonomy_sample": [video.as_payload() for video in sample],
@@ -401,7 +448,9 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             }
             print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
+
         else:
+            annotation_taxonomy_source = "discover"
             if not videos:
                 print(
                     json.dumps(
@@ -411,6 +460,7 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                             "selection_id": args.selection,
                             "scope": args.scope,
                             "taxonomy_source": "discover",
+                            "taxonomy_mode": "discover",
                             "video_count": 0,
                             "annotations": [],
                         },
@@ -420,6 +470,7 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                     )
                 )
                 return 0
+
             sample = even_sample(videos, args.taxonomy_sample)
             with ConsoleProgress(selected_progress_mode(args)) as progress:
                 discovery = discover_taxonomy(
@@ -432,6 +483,25 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             categories = discovery.categories
             taxonomy_context["taxonomy_discovery"] = discovery.as_context()
             taxonomy_context["taxonomy_sample_count"] = len(sample)
+
+            if not args.no_store:
+                taxonomy_id = store_taxonomy(
+                    conn,
+                    snapshot_id=snapshot_id,
+                    selection_id=args.selection,
+                    provider=provider,
+                    discovery=discovery,
+                    sample_count=len(sample),
+                    max_categories=args.max_categories,
+                    interest_profile=base_prompt.profile_name,
+                )
+                taxonomy_context["taxonomy_id"] = taxonomy_id
+                print(
+                    f"Saved discovered taxonomy {taxonomy_id} "
+                    f"({len(discovery.categories)} categories)",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         prompt = render_annotation_prompt(
             config,
@@ -466,7 +536,9 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 "snapshot_id": snapshot_id,
                 "selection_id": args.selection,
                 "scope": args.scope,
-                "taxonomy_source": args.taxonomy,
+                "taxonomy_source": annotation_taxonomy_source,
+                "taxonomy_mode": args.taxonomy,
+                "taxonomy_id": taxonomy_context.get("taxonomy_id"),
                 "taxonomy": prompt.categories,
                 "provider": provider.name,
                 "model": provider.model,
@@ -497,7 +569,12 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
 
     if args.no_store:
         output = _annotation_ephemeral_payload(
-            provider, prompt, videos, result, args.taxonomy, context
+            provider,
+            prompt,
+            videos,
+            result,
+            annotation_taxonomy_source,
+            context,
         )
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -511,11 +588,25 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             prompt=prompt,
             videos=videos,
             result=result,
-            taxonomy_source=args.taxonomy,
+            taxonomy_source=annotation_taxonomy_source,
             context=context,
         )
         output = annotation_run_payload(conn, run_id)
     output["cache"] = "refresh" if args.refresh else "miss"
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_taxonomies(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        output = taxonomy_list_payload(conn, snapshot_id=args.snapshot)
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_taxonomy(args: argparse.Namespace) -> int:
+    with open_catalogue(args.db) as conn:
+        output = taxonomy_payload(conn, args.taxonomy_id)
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
@@ -768,6 +859,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_classify(args)
         if args.command == "annotate":
             return _cmd_annotate(args)
+        if args.command == "taxonomies":
+            return _cmd_taxonomies(args)
+        if args.command == "taxonomy":
+            return _cmd_taxonomy(args)
         if args.command == "annotation-results":
             return _cmd_annotation_results(args)
         if args.command == "refine-description":
