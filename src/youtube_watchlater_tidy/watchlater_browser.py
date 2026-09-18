@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, urlparse
 
+from .browser_session import DEFAULT_CDP_ENDPOINT, PlaywrightBrowserSession
 from .watchlater_removal import (
     checkpoint_removal,
     finish_removal_run,
@@ -66,6 +67,7 @@ class PlaywrightWatchLaterClient:
         user_data_dir: str | Path = DEFAULT_BROWSER_PROFILE,
         headless: bool = False,
         channel: str | None = None,
+        cdp_endpoint: str | None = None,
         action_menu_label: str = "Action menu",
         remove_label: str = "Remove from Watch later",
         max_scrolls: int = 250,
@@ -78,23 +80,14 @@ class PlaywrightWatchLaterClient:
             raise ValueError("scroll_pause cannot be negative")
         if stable_rounds < 1:
             raise ValueError("stable_rounds must be at least 1")
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
-            raise RuntimeError(
-                "browser execution support is not installed; run `pip install -e '.[browser]'` "
-                "and `playwright install chromium`"
-            ) from exc
-
-        self._pw = sync_playwright().start()
-        launch: dict[str, Any] = {
-            "user_data_dir": str(Path(user_data_dir)),
-            "headless": headless,
-        }
-        if channel:
-            launch["channel"] = channel
-        self._context = self._pw.chromium.launch_persistent_context(**launch)
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        self._session = PlaywrightBrowserSession(
+            user_data_dir=user_data_dir,
+            headless=headless,
+            channel=channel,
+            cdp_endpoint=cdp_endpoint,
+        )
+        self._context = self._session.context
+        self._page = self._session.page
         self.action_menu_label = action_menu_label
         self.remove_label = remove_label
         self.max_scrolls = max_scrolls
@@ -103,10 +96,7 @@ class PlaywrightWatchLaterClient:
         self._loaded = False
 
     def close(self) -> None:
-        try:
-            self._context.close()
-        finally:
-            self._pw.stop()
+        self._session.close()
 
     def _ensure_watch_later(self) -> None:
         if self._loaded and "list=WL" in self._page.url:
@@ -220,28 +210,26 @@ class PlaywrightWatchLaterClient:
 
 def open_login_session(
     *,
-    user_data_dir: str | Path = DEFAULT_BROWSER_PROFILE,
-    channel: str | None = None,
+    cdp_endpoint: str = DEFAULT_CDP_ENDPOINT,
 ) -> None:
+    """Open Watch Later in an already-running, manually launched Chromium browser.
+
+    Authentication happens in the user's normal browser process rather than in a browser
+    launched by Playwright. Start Chrome/Chromium with a remote-debugging endpoint first,
+    sign in manually there, then use this helper only to verify/navigate the session.
+    """
+    session = PlaywrightBrowserSession(
+        user_data_dir=DEFAULT_BROWSER_PROFILE,
+        cdp_endpoint=cdp_endpoint,
+    )
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise RuntimeError(
-            "browser execution support is not installed; run `pip install -e '.[browser]'` "
-            "and `playwright install chromium`"
-        ) from exc
-    with sync_playwright() as pw:
-        kwargs: dict[str, Any] = {
-            "user_data_dir": str(Path(user_data_dir)),
-            "headless": False,
-        }
-        if channel:
-            kwargs["channel"] = channel
-        context = pw.chromium.launch_persistent_context(**kwargs)
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(WATCH_LATER_URL, wait_until="domcontentloaded")
-        input("Sign in to YouTube in the opened browser if needed, then press Enter here to close it: ")
-        context.close()
+        session.page.goto(WATCH_LATER_URL, wait_until="domcontentloaded")
+        input(
+            "Use the attached browser to sign in to YouTube if needed, "
+            "then press Enter here to disconnect: "
+        )
+    finally:
+        session.close()
 
 
 def execute_removal_plan(
