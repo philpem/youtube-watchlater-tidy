@@ -111,6 +111,22 @@ def annotation_cache_key(
     return provider_sha, input_sha, key
 
 
+def _annotation_context_matches(
+    provider_config_json: str,
+    required_context: dict[str, Any] | None,
+) -> bool:
+    if not required_context:
+        return True
+    try:
+        provider_config = json.loads(provider_config_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    context = provider_config.get("annotation_context", {})
+    if not isinstance(context, dict):
+        return False
+    return all(context.get(key) == value for key, value in required_context.items())
+
+
 def cached_annotation_run_id(
     conn: sqlite3.Connection,
     *,
@@ -118,10 +134,11 @@ def cached_annotation_run_id(
     provider_sha256: str,
     prompt_sha256: str,
     input_sha256: str,
+    required_context: dict[str, Any] | None = None,
 ) -> int | None:
-    row = conn.execute(
+    rows = conn.execute(
         """
-        SELECT id
+        SELECT id, provider_config_json
         FROM llm_annotation_runs
         WHERE snapshot_id = ?
           AND provider_sha256 = ?
@@ -129,11 +146,13 @@ def cached_annotation_run_id(
           AND input_sha256 = ?
           AND status = 'complete'
         ORDER BY id DESC
-        LIMIT 1
         """,
         (snapshot_id, provider_sha256, prompt_sha256, input_sha256),
-    ).fetchone()
-    return None if row is None else int(row["id"])
+    ).fetchall()
+    for row in rows:
+        if _annotation_context_matches(row["provider_config_json"], required_context):
+            return int(row["id"])
+    return None
 
 
 def incomplete_annotation_run_id(
@@ -145,6 +164,7 @@ def incomplete_annotation_run_id(
     input_sha256: str,
     videos: list[Any],
     batch_size: int,
+    required_context: dict[str, Any] | None = None,
 ) -> int | None:
     """Return the newest compatible incomplete run whose stored batches still match.
 
@@ -155,7 +175,7 @@ def incomplete_annotation_run_id(
 
     candidates = conn.execute(
         """
-        SELECT id
+        SELECT id, provider_config_json
         FROM llm_annotation_runs
         WHERE snapshot_id = ?
           AND requested_model = ?
@@ -171,6 +191,10 @@ def incomplete_annotation_run_id(
         for index in range(0, len(videos), batch_size)
     ]
     for candidate in candidates:
+        if not _annotation_context_matches(
+            candidate["provider_config_json"], required_context
+        ):
+            continue
         run_id = int(candidate["id"])
         stored = conn.execute(
             """
