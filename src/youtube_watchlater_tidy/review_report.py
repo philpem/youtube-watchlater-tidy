@@ -448,10 +448,11 @@ function semanticHtml(annotation) {{
   if(!annotation) return '<div class="small">no semantic annotation</div>';
   const category='<button type="button" class="facet-chip category-chip '+(selectedCategories.has(annotation.primary_category)?'active':'')+'" data-category="'+esc(annotation.primary_category)+'">'+esc(annotation.primary_category)+'</button>';
   const tags=(annotation.tags||[]).map(tag=>'<button type="button" class="facet-chip tag-chip '+(selectedTags.has(tag)?'active':'')+'" data-tag="'+esc(tag)+'">#'+esc(tag)+'</button>').join('');
+  const runState=annotation.run_status==='complete'?'':' · partial';
   return '<div class="semantic-category">'+category+' · '+Math.round((annotation.confidence??0)*100)+'%</div>'
     +'<div class="semantic-subject">'+esc(annotation.subject)+'</div>'
     +'<div class="semantic-tags">'+tags+'</div>'
-    +'<div class="small">'+esc(annotation.content_type)+' · annotation run '+annotation.run_id+'</div>';
+    +'<div class="small">'+esc(annotation.content_type)+' · annotation run '+annotation.run_id+runState+'</div>';
 }}
 function suggestionHtml(llm) {{
   if(!llm) return '<div class="small">no stored LLM suggestion</div>';
