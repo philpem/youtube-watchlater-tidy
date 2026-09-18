@@ -91,6 +91,14 @@ watchlater-llm --config watchlater.toml annotate --scope remaining
 A selection can be targeted with `--selection SELECTION_ID`. Semantic annotations are
 stored separately from action suggestions and never create or supersede a decision.
 
+Stored annotation runs are checkpointed batch-by-batch. As soon as one provider response
+has been validated, that batch's categories/tags are committed to SQLite before the next
+queued request replaces it. If a run is interrupted or a later response fails, the
+already-validated annotations remain available through `annotation-results --run-id ID`.
+Rerunning the same command resumes an exact matching incomplete run and skips compatible
+checkpointed batches; `--refresh` deliberately starts a new run instead. A partial run
+reports its stored progress as `stored_video_count` and `batch_count`.
+
 If you do not want to maintain the broad vocabulary manually, an optional discovery pass
 can propose one from an evenly-spaced sample of catalogue metadata and then hold that
 vocabulary fixed for the actual annotation batches:
