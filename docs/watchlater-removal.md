@@ -67,34 +67,37 @@ If the current decision changes since planning, the item is reported with:
 
 The executor refuses a plan containing stale items before opening a destructive run and rechecks authorization immediately before each browser attempt.
 
-## Install Playwright support
+## Install Playwright support and authenticate outside automation
+
+Install the optional browser support:
 
 ```bash
 pip install -e '.[browser]'
-playwright install chromium
 ```
 
-The destination-playlist and Watch Later browser executors share the dedicated profile:
+Google may reject login attempts from a Playwright-launched browser. The recommended Watch Later flow therefore attaches to a browser that you launch and authenticate manually.
 
-```text
-.watchlater-playwright-profile/
-```
-
-It is ignored by Git. Use the automation profile rather than your normal browser profile.
-
-Sign in once:
+For example on Linux:
 
 ```bash
-watchlater-remove login
+google-chrome \
+    --remote-debugging-port=9222 \
+    --user-data-dir="$HOME/.local/share/watchlater-chrome"
 ```
 
-or equivalently:
+Use `chromium` instead where appropriate. Sign in to YouTube manually in that browser window. Keep this as a dedicated profile rather than enabling remote debugging on your normal interactive profile.
+
+You can then verify/prepare the session with either command:
 
 ```bash
-watchlater-playlist browser-login
+watchlater-remove login --cdp-endpoint http://127.0.0.1:9222
+# or
+watchlater-playlist browser-login --cdp-endpoint http://127.0.0.1:9222
 ```
 
-Use `--user-data-dir PATH` for another profile. `--channel` can select a Playwright browser channel.
+These commands attach to the already-running browser and navigate to Watch Later; they do not launch a browser for Google authentication.
+
+The older `.watchlater-playwright-profile/` launch mode remains available when `--cdp-endpoint` is omitted, for already-authenticated profiles. Do not rely on that mode for a fresh Google login.
 
 ## Dry-run execution
 
@@ -111,7 +114,8 @@ A real run requires both flags:
 ```bash
 watchlater-remove execute --run-id 3 \
     --apply \
-    --confirm-remove
+    --confirm-remove \
+    --cdp-endpoint http://127.0.0.1:9222
 ```
 
 `--apply` alone is rejected. Start with a small cap:
@@ -119,7 +123,8 @@ watchlater-remove execute --run-id 3 \
 ```bash
 watchlater-remove execute --run-id 3 \
     --apply --confirm-remove \
-    --max-deletes 3
+    --max-deletes 3 \
+    --cdp-endpoint http://127.0.0.1:9222
 ```
 
 Completed `removed` / `already_absent` rows are terminal checkpoints and are skipped on resume. `not_found` and `failed` remain retriable.
@@ -186,7 +191,7 @@ A small `--max-deletes` is recommended for initial real-world testing because Yo
 
 ## Headless mode
 
-Headed execution is the default because it keeps destructive behavior visible. For an already-validated setup:
+In attached-browser mode, headed/headless state is controlled by the browser you launched. In legacy Playwright-profile mode, headed execution is the default because it keeps destructive behavior visible. For an already-validated legacy setup:
 
 ```bash
 watchlater-remove execute --run-id 3 --apply --confirm-remove --headless
