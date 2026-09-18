@@ -641,7 +641,7 @@ def annotate(
         item: tuple[int, list[ClassificationEvidence]],
         response: ChatResponse,
     ) -> AnnotationBatchResult:
-        nonlocal completed_videos, completed_batches
+        nonlocal completed_videos, completed_batches, drain_in_flight
         original_index, batch = item
         result = validate_batch(f"batch {original_index + 1}", batch, response)
 
@@ -654,8 +654,20 @@ def annotate(
         if progress is not None:
             newly_completed = completed_batches - initial_completed_batches
             pending_remaining = len(pending) - newly_completed
-            in_flight = min(provider.concurrency, pending_remaining)
-            queued = max(0, pending_remaining - in_flight)
+            if draining:
+                drain_in_flight = max(0, drain_in_flight - 1)
+                detail = (
+                    f"{completed_batches}/{len(batches)} batches validated; "
+                    f"draining after interrupt: {drain_in_flight} in flight; "
+                    f"{drain_queued} queued will not start"
+                )
+            else:
+                in_flight = min(provider.concurrency, pending_remaining)
+                queued = max(0, pending_remaining - in_flight)
+                detail = (
+                    f"{completed_batches}/{len(batches)} batches validated; "
+                    f"{in_flight} in flight; {queued} queued"
+                )
             progress(
                 ProgressEvent(
                     phase=phase,
@@ -663,14 +675,37 @@ def annotate(
                     completed=completed_videos,
                     total=len(videos),
                     unit="video",
-                    detail=(
-                        f"{completed_batches}/{len(batches)} batches validated; "
-                        f"{in_flight} in flight; {queued} queued"
-                    ),
+                    detail=detail,
                     counters={"responses": responses_received},
                 )
             )
         return result
+
+    draining = False
+    drain_in_flight = 0
+    drain_queued = 0
+
+    def on_interrupt(in_flight: int, queued: int) -> None:
+        nonlocal draining, drain_in_flight, drain_queued
+        draining = True
+        drain_in_flight = in_flight
+        drain_queued = queued
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase=phase,
+                    kind="message",
+                    completed=completed_videos,
+                    total=len(videos),
+                    unit="video",
+                    detail=(
+                        f"interrupt received; draining {in_flight} in-flight request(s); "
+                        f"{queued} queued request(s) will not start; "
+                        "press Ctrl-C again to abort immediately"
+                    ),
+                    counters={"responses": responses_received},
+                )
+            )
 
     results = run_bounded_parallel(
         pending,
@@ -678,6 +713,8 @@ def annotate(
         request=request,
         consume=consume,
         on_response=on_response,
+        drain_on_interrupt=on_batch is not None,
+        on_interrupt=on_interrupt,
     )
 
     ordered_batches = tuple(results[index] for index in range(len(pending)))
