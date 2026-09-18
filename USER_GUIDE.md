@@ -3,6 +3,8 @@
 The canonical operator guide now lives at [`docs/index.md`](docs/index.md), where it is also the
 landing page for the MkDocs documentation site.
 
+Published documentation: <https://philpem.github.io/youtube-watchlater-tidy/>
+
 On GitHub, the Markdown file is directly readable without building anything.
 
 For a local wiki-style site:

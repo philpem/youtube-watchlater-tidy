@@ -4,7 +4,10 @@ Tools for exporting, triaging, classifying, and cleaning up a large YouTube Watc
 
 ## Documentation
 
-Start with the [operator guide](docs/index.md). It covers import, the different review/triage workflows, how local decisions are recorded, and how to dry-run/apply those decisions on YouTube.
+Start with the [published operator guide](https://philpem.github.io/youtube-watchlater-tidy/).
+The same guide is available as [`docs/index.md`](docs/index.md) in the repository. It covers
+import, the different review/triage workflows, how local decisions are recorded, and how to
+dry-run/apply those decisions on YouTube.
 
 For a local wiki-style documentation site:
 

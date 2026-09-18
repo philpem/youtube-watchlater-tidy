@@ -32,6 +32,9 @@ A `move` is deliberately gated: Watch Later removal is not allowed until every r
 
 ## 1. Install
 
+See [Installation, updates and local data](install.md) for source checkout, optional extras,
+backups and upgrade behavior.
+
 Core install:
 
 ```bash
@@ -122,6 +125,9 @@ watchlater recover --unavailable --limit 10
 watchlater videos --unavailable --recovered
 watchlater videos --unavailable --unrecovered
 ```
+
+See [Archive recovery](archive-recovery.md) for targeting, caching, provenance and
+rate-limit behavior.
 
 Cached archive results are skipped before `--limit`, so repeated runs advance through the uncached remainder. Prefer explicit targets for `--refresh`.
 
@@ -295,6 +301,11 @@ watchlater-playlist plan --backend browser --output playlist-plan.json
 watchlater-playlist show
 ```
 
+`watchlater-playlist plan` persists the plan and prints JSON containing a top-level
+`run_id`. That integer is the `PLAN_ID`/`API_PLAN_ID`/`BROWSER_PLAN_ID` used below. For
+example, if planning prints `"run_id": 7`, execute it with `--run-id 7`. The optional
+`--output` file is only an inspectable copy; the authoritative plan remains in SQLite.
+
 For a multi-destination decision, the plan contains one independently checkpointed item per `(video, destination)` pair. Quota estimates count every missing API insertion plus any required playlist creation.
 
 Inspect without writes:
@@ -304,6 +315,9 @@ watchlater-playlist execute --run-id PLAN_ID
 ```
 
 ### API backend
+
+Complete OAuth setup and first-run authorization are documented in the
+[YouTube Data API workflow](youtube-api.md).
 
 ```bash
 watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
@@ -326,6 +340,9 @@ watchlater-playlist execute --run-id BROWSER_PLAN_ID \
     --apply --max-writes 3 \
     --cdp-endpoint http://127.0.0.1:9222
 ```
+
+Here `BROWSER_PLAN_ID` is the top-level `run_id` printed earlier by
+`watchlater-playlist plan --backend browser`; it is not the output filename.
 
 Both executors check live membership before insertion, checkpoint every destination separately, refuse stale decision-event IDs, and resume without repeating confirmed work. A secondary destination is valid because authorization is checked against the complete destination set on the exact current decision.
 
@@ -457,6 +474,9 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
 
 ## 15. Detailed documentation
 
+- [`docs/install.md`](install.md) — installation, private local files and updates.
+- [`docs/cli-reference.md`](cli-reference.md) — command families and ID placeholders.
+- [`docs/archive-recovery.md`](archive-recovery.md) — deleted/private metadata recovery.
 - [`docs/dearrow.md`](dearrow.md) — alternate-title trust/privacy.
 - [`docs/llm.md`](llm.md) — LLM provider configuration.
 - [`docs/llm-classification.md`](llm-classification.md) — evidence/validation/history.
@@ -464,7 +484,9 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
 - [`docs/transcripts.md`](transcripts.md) — caption acquisition/refinement.
 - [`docs/review.md`](review.md) — static HTML human review.
 - [`docs/playlist-sync.md`](playlist-sync.md) — destination assignment/planning/execution.
+- [`docs/youtube-api.md`](youtube-api.md) — Google OAuth and the API playlist workflow.
 - [`docs/playlist-browser.md`](playlist-browser.md) — destination Playwright execution.
 - [`docs/watchlater-removal.md`](watchlater-removal.md) — selective source removal.
+- [`docs/troubleshooting.md`](troubleshooting.md) — common setup and execution failures.
 
 Use `COMMAND --help` as the definitive option reference for the installed version.
