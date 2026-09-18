@@ -33,14 +33,20 @@ def _is_sensitive_header(name: str) -> bool:
     return any(token in folded for token in ("api-key", "apikey", "token", "secret"))
 
 
-def _redact(value: Any, secrets: tuple[str, ...], *, key: str | None = None) -> Any:
-    if key is not None and _is_sensitive_header(key):
-        return _REDACTED
+def _redact(value: Any, secrets: tuple[str, ...], *, in_headers: bool = False) -> Any:
     if isinstance(value, dict):
-        return {
-            str(child_key): _redact(child_value, secrets, key=str(child_key))
-            for child_key, child_value in value.items()
-        }
+        result: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            key = str(child_key)
+            if in_headers and _is_sensitive_header(key):
+                result[key] = _REDACTED
+            else:
+                result[key] = _redact(
+                    child_value,
+                    secrets,
+                    in_headers=(key == "headers"),
+                )
+        return result
     if isinstance(value, list):
         return [_redact(item, secrets) for item in value]
     if isinstance(value, tuple):
