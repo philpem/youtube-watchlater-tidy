@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .db import open_catalogue
@@ -19,6 +20,7 @@ from .llm_annotation_store import (
     begin_annotation_run,
     cached_annotation_run_id,
     complete_annotation_run,
+    content_filtered_retry_target,
     incomplete_annotation_run_id,
     latest_annotation_run_id,
     store_annotation_batch,
@@ -218,6 +220,46 @@ def _parser() -> argparse.ArgumentParser:
     )
     annotation_results.add_argument("--run-id", type=int)
     annotation_results.add_argument("--snapshot", type=int)
+
+    retry_filtered = sub.add_parser(
+        "retry-content-filtered",
+        help="retry content-filtered semantic annotations with another provider/model",
+    )
+    retry_filtered.add_argument(
+        "--run-id",
+        type=int,
+        required=True,
+        help="source semantic annotation run containing content-filtered fallbacks",
+    )
+    retry_filtered.add_argument("--provider")
+    retry_filtered.add_argument(
+        "--model",
+        help="override the selected provider profile's configured model for this retry",
+    )
+    retry_filtered.add_argument("--interest-profile")
+    retry_filtered.add_argument("--prompt-file", type=Path)
+    retry_filtered.add_argument("--batch-size", type=int, default=5)
+    retry_filtered.add_argument(
+        "--llm-log",
+        type=Path,
+        help="append redacted LLM request/response diagnostics as JSON Lines",
+    )
+    retry_filtered.add_argument(
+        "--refresh",
+        action="store_true",
+        help="ignore an exact cached retry and append a fresh annotation run",
+    )
+    retry_filtered.add_argument(
+        "--no-store",
+        action="store_true",
+        help="call the provider without reading/writing the annotation cache",
+    )
+    retry_filtered.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show the filtered cohort, taxonomy, provider and model without making requests",
+    )
+    add_progress_argument(retry_filtered, include_no_progress=True)
 
     refine_parser = sub.add_parser(
         "refine-description",
