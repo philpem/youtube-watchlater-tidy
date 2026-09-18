@@ -110,6 +110,10 @@ def _cmd_login(args: argparse.Namespace) -> int:
 
 def _cmd_execute(args: argparse.Namespace) -> int:
     client = None
+
+    def progress(message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
     try:
         with open_catalogue(args.db) as conn:
             run_id = _resolve_run_id(conn, args)
@@ -134,6 +138,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                     remove_label=args.remove_label,
                     max_scrolls=args.max_scrolls,
                     scroll_pause=args.scroll_pause,
+                    progress=progress,
                 )
             result = execute_removal_plan(
                 conn,
@@ -145,6 +150,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                 interval=args.interval,
                 retries=args.retries,
                 backoff=args.backoff,
+                progress=progress,
             )
             payload = removal_plan_payload(conn, run_id)
         print(
