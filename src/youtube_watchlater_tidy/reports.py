@@ -94,12 +94,12 @@ def creator_rows(
     if snapshot_id is None:
         snapshot_id = latest_snapshot_id(conn)
 
-    rows = _effective_rows(conn, snapshot_id)
+    all_rows = _effective_rows(conn, snapshot_id)
+    names_to_keys, primary_details = primary_creator_index(all_rows)
 
+    rows = all_rows
     if remaining:
         rows = [row for row in rows if row["current_action"] in (None, "clear")]
-
-    names_to_keys, primary_details = primary_creator_index(rows)
     grouped: dict[str, dict[str, object]] = {}
     for row in rows:
         for association in creator_associations(
