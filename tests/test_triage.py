@@ -88,6 +88,54 @@ class TriageTests(unittest.TestCase):
             rows = selection_rows(conn, selection.selection_id)
             self.assertEqual([row.video_id for row in rows], ["b"])
 
+    def test_creator_selection_includes_explicit_collaborations(self) -> None:
+        collaborations = self.root / "collaborations.json"
+        collaborations.write_text(
+            json.dumps(
+                {
+                    "id": "WL-collabs",
+                    "entries": [
+                        {
+                            "id": "host-collab",
+                            "title": "Host with Guest",
+                            "channel_id": "host-id",
+                            "channel": "Host",
+                            "creators": ["Host", "Guest", "Cameo"],
+                        },
+                        {
+                            "id": "guest-solo",
+                            "title": "Guest solo",
+                            "channel_id": "guest-id",
+                            "channel": "Guest",
+                            "creators": ["Guest"],
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with open_catalogue(self.db_path) as conn:
+            snap = import_watchlater_json(conn, collaborations).snapshot_id
+
+            by_id = select_creator(conn, "guest-id", snap)
+            self.assertEqual(
+                [row.video_id for row in selection_rows(conn, by_id.selection_id)],
+                ["host-collab", "guest-solo"],
+            )
+
+            by_name = select_creator(conn, "Guest", snap)
+            self.assertEqual(
+                [row.video_id for row in selection_rows(conn, by_name.selection_id)],
+                ["host-collab", "guest-solo"],
+            )
+
+            collaborator_only = select_creator(conn, "Cameo", snap)
+            self.assertEqual(
+                [row.video_id for row in selection_rows(conn, collaborator_only.selection_id)],
+                ["host-collab"],
+            )
+
     def test_creator_name_ambiguity_is_rejected(self) -> None:
         ambiguous = self.root / "ambiguous.json"
         ambiguous.write_text(json.dumps({"id": "WL", "entries": [

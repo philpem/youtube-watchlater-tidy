@@ -91,7 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     creators_parser = subparsers.add_parser("creators", help="show videos grouped by creator/channel")
     creators_parser.add_argument("--snapshot", type=int, help="snapshot id (default: latest)")
-    creators_parser.add_argument("--limit", type=int, default=50, help="maximum rows to show (default: 50)")
+    creators_parser.add_argument("--limit", type=int, help="maximum rows to show (default: all)")
     creators_parser.add_argument("--remaining", action="store_true", help="only unresolved videos")
 
     keywords_parser = subparsers.add_parser(

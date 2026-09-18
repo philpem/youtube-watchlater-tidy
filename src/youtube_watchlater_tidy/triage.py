@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from .creator_metadata import primary_creator_index, row_matches_creator
 from .reports import latest_snapshot_id
 
 ACTIONS = ("keep", "review", "archive", "delete", "move")
@@ -36,16 +37,6 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _creator_key(row: sqlite3.Row) -> str:
-    return str(
-        row["channel_id"]
-        or row["uploader_id"]
-        or row["channel"]
-        or row["uploader"]
-        or "(unknown)"
-    )
-
-
 def _rows_for_snapshot(
     conn: sqlite3.Connection,
     snapshot_id: int,
@@ -67,6 +58,8 @@ def _rows_for_snapshot(
                COALESCE(e.uploader_id, m.uploader_id) AS uploader_id,
                COALESCE(e.duration, m.duration) AS duration,
                COALESCE(e.view_count, m.view_count) AS view_count,
+               e.raw_json AS source_raw_json,
+               m.raw_json AS metadata_raw_json,
                d.action AS current_action,
                d.destination_playlist
         FROM snapshot_entries AS e
@@ -149,24 +142,31 @@ def select_creator(
 ) -> SelectionResult:
     if snapshot_id is None:
         snapshot_id = latest_snapshot_id(conn)
-    rows = _rows_for_snapshot(conn, snapshot_id, remaining=remaining)
+    all_rows = _rows_for_snapshot(conn, snapshot_id, remaining=False)
+    names_to_keys, _primary_details = primary_creator_index(all_rows)
+    rows = (
+        [row for row in all_rows if row["current_action"] in (None, "clear")]
+        if remaining
+        else all_rows
+    )
 
-    exact_key_rows = [row for row in rows if _creator_key(row) == creator]
-    if exact_key_rows:
-        matched = exact_key_rows
-    else:
-        folded = creator.casefold()
-        name_matches: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            names = [row["channel"], row["uploader"], row["uploader_id"]]
-            if any(isinstance(name, str) and name.casefold() == folded for name in names):
-                name_matches.setdefault(_creator_key(row), []).append(row)
-        if len(name_matches) > 1:
-            keys = ", ".join(sorted(name_matches))
-            raise ValueError(
-                f"creator name {creator!r} is ambiguous; use a stable channel/uploader id: {keys}"
-            )
-        matched = next(iter(name_matches.values()), [])
+    folded = creator.casefold()
+    matching_primary_keys = names_to_keys.get(folded, set())
+    if len(matching_primary_keys) > 1:
+        keys = ", ".join(sorted(matching_primary_keys))
+        raise ValueError(
+            f"creator name {creator!r} is ambiguous; use a stable channel/uploader id: {keys}"
+        )
+
+    matched = [
+        row
+        for row in rows
+        if row_matches_creator(
+            row,
+            creator,
+            names_to_keys=names_to_keys,
+        )
+    ]
 
     matched = _apply_ranges(
         matched,

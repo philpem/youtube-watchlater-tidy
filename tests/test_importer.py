@@ -7,7 +7,7 @@ from pathlib import Path
 
 from youtube_watchlater_tidy.db import connect
 from youtube_watchlater_tidy.importer import import_watchlater_json
-from youtube_watchlater_tidy.reports import creator_rows
+from youtube_watchlater_tidy.reports import creator_rows, render_creators
 
 
 class ImporterTests(unittest.TestCase):
@@ -72,6 +72,62 @@ class ImporterTests(unittest.TestCase):
             [(row["position"], row["video_id"], row["title"]) for row in entries],
             [(1, "aaa111", "First"), (2, "bbb222", "Second")],
         )
+
+    def test_creator_report_counts_explicit_collaborators_and_renders_total(self) -> None:
+        source = self._write_export(
+            "collaborations.json",
+            [
+                {
+                    "id": "host-video",
+                    "title": "Host and Guest collaborate",
+                    "channel_id": "host-id",
+                    "channel": "Host",
+                    "creators": ["Host", "Guest", "Guest"],
+                    "duration": 100,
+                    "view_count": 1000,
+                },
+                {
+                    "id": "guest-video",
+                    "title": "Guest solo",
+                    "channel_id": "guest-id",
+                    "channel": "Guest",
+                    "creators": ["Guest"],
+                    "duration": 200,
+                    "view_count": 2000,
+                },
+                {
+                    "id": "cameo-video",
+                    "title": "Host with Cameo",
+                    "channel_id": "host-id",
+                    "channel": "Host",
+                    "creators": ["Host", "Cameo"],
+                    "duration": 300,
+                    "view_count": 3000,
+                },
+            ],
+        )
+
+        with connect(self.db_path) as conn:
+            imported = import_watchlater_json(conn, source)
+            rows = creator_rows(conn, imported.snapshot_id)
+
+        by_id = {row.channel_id: row for row in rows if row.channel_id is not None}
+        by_name = {row.name: row for row in rows}
+        self.assertEqual(by_id["host-id"].count, 2)
+        self.assertEqual(by_id["guest-id"].count, 2)
+        self.assertEqual(by_name["Cameo"].count, 1)
+        self.assertIsNone(by_name["Cameo"].channel_id)
+
+        # Host appears both as the uploader and in creators[], but the video is
+        # counted only once for Host.
+        self.assertEqual(by_id["host-id"].total_duration, 400)
+
+        limited = render_creators(rows, limit=2)
+        self.assertIn("... 1 more", limited)
+        self.assertIn("3 creator(s)", limited)
+        unlimited = render_creators(rows)
+        self.assertNotIn("... ", unlimited)
+        self.assertIn("3 creator(s)", unlimited)
 
     def test_later_snapshot_does_not_destroy_old_metadata(self) -> None:
         first_source = self._write_export(
