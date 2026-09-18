@@ -71,7 +71,7 @@ def build_chat_request(
         "messages": messages,
         "temperature": provider.temperature,
         "max_tokens": provider.max_tokens,
-        "stream": False,
+        "stream": provider.stream,
     }
     response_format = _response_format(provider, json_schema)
     if response_format is not None:
@@ -190,6 +190,151 @@ def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatRespon
     )
 
 
+def _stream_delta_text(content: Any, provider: ProviderConfig) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for index, part in enumerate(content):
+            if isinstance(part, str):
+                parts.append(part)
+                continue
+            if not isinstance(part, dict):
+                raise RuntimeError(
+                    f"provider {provider.name!r} stream content part {index} "
+                    f"has unsupported type {type(part).__name__}"
+                )
+            part_type = part.get("type")
+            text = part.get("text")
+            if part_type in {"text", "output_text"} and isinstance(text, str):
+                parts.append(text)
+                continue
+            raise RuntimeError(
+                f"provider {provider.name!r} stream contains unsupported "
+                f"content part {index}:{part_type or 'unknown'}"
+            )
+        return "".join(parts)
+    raise RuntimeError(
+        f"provider {provider.name!r} stream content has unsupported type "
+        f"{type(content).__name__}"
+    )
+
+
+def _parse_streaming_chat_response(
+    response: Any,
+    provider: ProviderConfig,
+    *,
+    progress: ProgressCallback | None,
+    phase: str,
+    started_at: float,
+) -> tuple[ChatResponse, str, float | None, int]:
+    content_parts: list[str] = []
+    raw_lines: list[str] = []
+    response_model: str | None = None
+    finish_reason: str | None = None
+    usage: dict[str, Any] = {}
+    first_activity_seconds: float | None = None
+    chars_received = 0
+    last_progress_at = 0.0
+    chunks = 0
+
+    for raw_line in response:
+        line = (
+            raw_line.decode("utf-8", errors="replace")
+            if isinstance(raw_line, (bytes, bytearray))
+            else str(raw_line)
+        )
+        raw_lines.append(line)
+        stripped = line.strip()
+        if not stripped or stripped.startswith(":"):
+            continue
+        if not stripped.startswith("data:"):
+            continue
+        data = stripped[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"provider {provider.name!r} returned invalid streaming JSON: {exc}"
+            ) from exc
+        if not isinstance(chunk, dict):
+            continue
+
+        chunks += 1
+        now = time.monotonic()
+        if first_activity_seconds is None:
+            first_activity_seconds = now - started_at
+
+        model = chunk.get("model")
+        if isinstance(model, str):
+            response_model = model
+        chunk_usage = chunk.get("usage")
+        if isinstance(chunk_usage, dict):
+            usage = dict(chunk_usage)
+
+        choices = chunk.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            choice = choices[0]
+            reason = choice.get("finish_reason")
+            if isinstance(reason, str):
+                finish_reason = reason
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                refusal = delta.get("refusal")
+                if isinstance(refusal, str) and refusal.strip():
+                    raise RuntimeError(
+                        f"provider {provider.name!r} refused the request: "
+                        f"{refusal.strip()[:500]}"
+                    )
+                piece = _stream_delta_text(delta.get("content"), provider)
+                if piece:
+                    content_parts.append(piece)
+                    chars_received += len(piece)
+
+        if progress is not None and (
+            last_progress_at == 0.0 or now - last_progress_at >= 1.0
+        ):
+            progress(
+                ProgressEvent(
+                    phase=phase,
+                    kind="status",
+                    detail=(
+                        f"{provider.name} responding; "
+                        f"{chars_received} chars received"
+                    ),
+                )
+            )
+            last_progress_at = now
+
+    content = "".join(content_parts)
+    raw = {
+        "model": response_model,
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage,
+    }
+    return (
+        ChatResponse(
+            content=content,
+            usage=usage,
+            model=response_model,
+            raw=raw,
+            finish_reason=finish_reason,
+        ),
+        "".join(raw_lines),
+        first_activity_seconds,
+        chunks,
+    )
+
+
 def chat(
     provider: ProviderConfig,
     messages: list[dict[str, str]],
@@ -238,12 +383,41 @@ def chat(
                 },
                 secrets=diagnostic_secrets,
             )
+        attempt_started = time.monotonic()
         try:
             with opener(request, timeout=provider.timeout) as response:
-                response_payload = response.read()
+                headers_received_seconds = time.monotonic() - attempt_started
                 status = getattr(response, "status", getattr(response, "code", None))
+                response_headers = dict(getattr(response, "headers", {}).items()) if getattr(response, "headers", None) is not None else {}
+                generation_id = response_headers.get("X-Generation-Id") or response_headers.get("x-generation-id")
+                if progress is not None and provider.stream:
+                    progress(
+                        ProgressEvent(
+                            phase=phase,
+                            kind="status",
+                            detail=(
+                                f"{provider.name} connected in "
+                                f"{headers_received_seconds:.1f}s; waiting for stream"
+                            ),
+                        )
+                    )
                 try:
-                    parsed = _parse_chat_response(response_payload, provider)
+                    if provider.stream:
+                        parsed, raw_body, first_activity_seconds, stream_chunks = (
+                            _parse_streaming_chat_response(
+                                response,
+                                provider,
+                                progress=progress,
+                                phase=phase,
+                                started_at=attempt_started,
+                            )
+                        )
+                    else:
+                        response_payload = response.read()
+                        raw_body = response_payload.decode("utf-8", errors="replace")
+                        parsed = _parse_chat_response(response_payload, provider)
+                        first_activity_seconds = None
+                        stream_chunks = 0
                 except Exception as exc:
                     if diagnostics is not None:
                         diagnostics.write(
@@ -254,14 +428,18 @@ def chat(
                                 "provider": provider.name,
                                 "configured_model": provider.model,
                                 "status": status,
-                                "raw_body": response_payload.decode(
-                                    "utf-8", errors="replace"
-                                ),
+                                "headers": response_headers,
+                                "generation_id": generation_id,
+                                "stream": provider.stream,
+                                "headers_received_seconds": headers_received_seconds,
+                                "total_seconds": time.monotonic() - attempt_started,
+                                "raw_body": locals().get("raw_body", ""),
                                 "parse_error": f"{type(exc).__name__}: {exc}",
                             },
                             secrets=diagnostic_secrets,
                         )
                     raise
+                total_seconds = time.monotonic() - attempt_started
                 if diagnostics is not None:
                     diagnostics.write(
                         "response",
@@ -272,11 +450,17 @@ def chat(
                             "configured_model": provider.model,
                             "response_model": parsed.model,
                             "status": status,
+                            "headers": response_headers,
+                            "generation_id": generation_id,
+                            "stream": provider.stream,
+                            "headers_received_seconds": headers_received_seconds,
+                            "first_activity_seconds": first_activity_seconds,
+                            "total_seconds": total_seconds,
+                            "stream_chunks": stream_chunks,
+                            "content_chars": len(parsed.content),
                             "finish_reason": parsed.finish_reason,
                             "usage": parsed.usage,
-                            "raw_body": response_payload.decode(
-                                "utf-8", errors="replace"
-                            ),
+                            "raw_body": raw_body,
                         },
                         secrets=diagnostic_secrets,
                     )
