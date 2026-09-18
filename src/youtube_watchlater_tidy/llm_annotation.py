@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .llm_classification import ClassificationEvidence, evidence_hash
 from .llm_config import ProjectConfig, ProviderConfig
@@ -406,44 +406,70 @@ def annotate(
     batch_size: int = 10,
     progress: ProgressCallback | None = None,
     phase: str = "LLM annotation",
+    completed_batch_indexes: set[int] | None = None,
+    on_batch: Callable[
+        [int, list[ClassificationEvidence], AnnotationBatchResult], None
+    ]
+    | None = None,
 ) -> AnnotationRunResult:
     batches = _batches(videos, batch_size)
     if not batches:
         return AnnotationRunResult(annotations=(), batches=())
 
+    completed = set(completed_batch_indexes or ())
+    invalid = sorted(index for index in completed if index < 0 or index >= len(batches))
+    if invalid:
+        raise ValueError(
+            "completed annotation batch index(es) out of range: "
+            + ", ".join(str(index) for index in invalid)
+        )
+    pending = [
+        (index, batch)
+        for index, batch in enumerate(batches)
+        if index not in completed
+    ]
+
+    completed_videos = sum(len(batches[index]) for index in completed)
+    completed_batches = len(completed)
+    responses_received = 0
+
     if progress is not None:
+        checkpoint_text = (
+            f"; {len(completed)} checkpointed"
+            if completed
+            else ""
+        )
         progress(
             ProgressEvent(
                 phase=phase,
                 kind="start",
-                completed=0,
+                completed=completed_videos,
                 total=len(videos),
                 unit="video",
                 detail=(
                     f"{len(batches)} batch(es); batch_size={batch_size}; "
-                    f"concurrency={provider.concurrency}"
+                    f"concurrency={provider.concurrency}{checkpoint_text}"
                 ),
             )
         )
-        in_flight = min(provider.concurrency, len(batches))
-        queued = max(0, len(batches) - in_flight)
+        in_flight = min(provider.concurrency, len(pending))
+        queued = max(0, len(pending) - in_flight)
+        detail = (
+            f"{in_flight} request(s) in flight; {queued} queued; "
+            "waiting for first response"
+            if pending
+            else "all batches already checkpointed"
+        )
         progress(
             ProgressEvent(
                 phase=phase,
                 kind="status",
-                completed=0,
+                completed=completed_videos,
                 total=len(videos),
                 unit="video",
-                detail=(
-                    f"{in_flight} request(s) in flight; {queued} queued; "
-                    "waiting for first response"
-                ),
+                detail=detail,
             )
         )
-
-    completed_videos = 0
-    completed_batches = 0
-    responses_received = 0
 
     def note_response(label: str) -> None:
         nonlocal responses_received
@@ -460,15 +486,20 @@ def annotate(
                 )
             )
 
-    def request(index: int, batch: list[ClassificationEvidence]) -> ChatResponse:
+    def request(
+        task_index: int,
+        item: tuple[int, list[ClassificationEvidence]],
+    ) -> ChatResponse:
+        _original_index, batch = item
         return _request_annotation_batch(provider, prompt, batch, progress, phase)
 
     def on_response(
-        index: int,
-        batch: list[ClassificationEvidence],
+        task_index: int,
+        item: tuple[int, list[ClassificationEvidence]],
         response: ChatResponse,
     ) -> None:
-        note_response(f"batch {index + 1}")
+        original_index, _batch = item
+        note_response(f"batch {original_index + 1}")
 
     def validate_batch(
         label: str,
@@ -564,20 +595,28 @@ def annotate(
             response_model=response.model,
         )
 
+    initial_completed_batches = completed_batches
+
     def consume(
-        index: int,
-        batch: list[ClassificationEvidence],
+        task_index: int,
+        item: tuple[int, list[ClassificationEvidence]],
         response: ChatResponse,
     ) -> AnnotationBatchResult:
         nonlocal completed_videos, completed_batches
-        result = validate_batch(f"batch {index + 1}", batch, response)
+        original_index, batch = item
+        result = validate_batch(f"batch {original_index + 1}", batch, response)
+
+        # Persist/apply the validated annotation batch before reporting it as complete.
+        if on_batch is not None:
+            on_batch(original_index, batch, result)
 
         completed_videos += len(result.annotations)
         completed_batches += 1
         if progress is not None:
-            remaining_batches = len(batches) - completed_batches
-            in_flight = min(provider.concurrency, remaining_batches)
-            queued = max(0, remaining_batches - in_flight)
+            newly_completed = completed_batches - initial_completed_batches
+            pending_remaining = len(pending) - newly_completed
+            in_flight = min(provider.concurrency, pending_remaining)
+            queued = max(0, pending_remaining - in_flight)
             progress(
                 ProgressEvent(
                     phase=phase,
@@ -595,14 +634,14 @@ def annotate(
         return result
 
     results = run_bounded_parallel(
-        batches,
+        pending,
         concurrency=provider.concurrency,
         request=request,
         consume=consume,
         on_response=on_response,
     )
 
-    ordered_batches = tuple(results[index] for index in range(len(batches)))
+    ordered_batches = tuple(results[index] for index in range(len(pending)))
     annotations = tuple(
         annotation for batch in ordered_batches for annotation in batch.annotations
     )
@@ -611,7 +650,7 @@ def annotate(
             ProgressEvent(
                 phase=phase,
                 kind="finish",
-                completed=len(annotations),
+                completed=completed_videos,
                 total=len(videos),
                 unit="video",
                 detail=f"{len(batches)} batch(es) complete",
@@ -619,6 +658,7 @@ def annotate(
             )
         )
     return AnnotationRunResult(annotations=annotations, batches=ordered_batches)
+
 
 def even_sample(
     videos: list[ClassificationEvidence],
