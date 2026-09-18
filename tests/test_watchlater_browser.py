@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from youtube_watchlater_tidy.db import open_catalogue
 from youtube_watchlater_tidy.importer import import_watchlater_json
 from youtube_watchlater_tidy.triage import apply_selection_action, select_title
+from youtube_watchlater_tidy.watchlater_remove_cli import main as removal_cli_main
 from youtube_watchlater_tidy.watchlater_browser import (
     BrowserRemovalAttempt,
     BrowserScanEvent,
@@ -140,6 +143,40 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
         self.assertFalse(result.applied)
         self.assertEqual(fake.calls, [])
         self.assertEqual(before, after)
+
+    def test_cli_execute_prints_concise_summary_by_default(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = removal_cli_main(
+                ["--db", str(self.db_path), "execute", "--run-id", str(self.plan.run_id)]
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            output.getvalue(),
+            f"Removal run {self.plan.run_id}: applied=no, status=planned, removed=0, "
+            "already_absent=0, not_found=0, failed=0, stale=0, remaining=3\n",
+        )
+
+    def test_cli_execute_json_preserves_full_machine_readable_output(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = removal_cli_main(
+                [
+                    "--db",
+                    str(self.db_path),
+                    "execute",
+                    "--run-id",
+                    str(self.plan.run_id),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["execution"]["run_id"], self.plan.run_id)
+        self.assertFalse(payload["execution"]["applied"])
+        self.assertEqual(len(payload["plan"]["items"]), 3)
 
     def test_apply_requires_second_destructive_confirmation(self) -> None:
         fake = FakeBrowser({"video00000A": "removed"})

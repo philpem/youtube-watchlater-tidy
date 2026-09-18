@@ -47,6 +47,11 @@ def _parser() -> argparse.ArgumentParser:
     execute = sub.add_parser("execute", help="inspect or apply a persisted removal plan")
     execute.add_argument("--run-id", type=int)
     execute.add_argument("--snapshot", type=int)
+    execute.add_argument(
+        "--json",
+        action="store_true",
+        help="print the full machine-readable execution result and plan",
+    )
     execute.add_argument("--apply", action="store_true", help="actually click Remove from Watch later")
     execute.add_argument(
         "--confirm-remove",
@@ -152,29 +157,36 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                 backoff=args.backoff,
                 progress=progress,
             )
-            payload = removal_plan_payload(conn, run_id)
-        print(
-            json.dumps(
-                {
-                    "execution": {
-                        "run_id": result.run_id,
-                        "applied": result.applied,
-                        "removed": result.removed,
-                        "already_absent": result.already_absent,
-                        "not_found": result.not_found,
-                        "failed": result.failed,
-                        "stale": result.stale,
-                        "remaining": result.remaining,
-                        "destructive_actions": result.destructive_actions,
-                        "run_status": result.run_status,
-                    },
-                    "plan": payload,
-                },
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
+            payload = removal_plan_payload(conn, run_id) if args.json else None
+        execution = {
+            "run_id": result.run_id,
+            "applied": result.applied,
+            "removed": result.removed,
+            "already_absent": result.already_absent,
+            "not_found": result.not_found,
+            "failed": result.failed,
+            "stale": result.stale,
+            "remaining": result.remaining,
+            "destructive_actions": result.destructive_actions,
+            "run_status": result.run_status,
+        }
+        if args.json:
+            print(
+                json.dumps(
+                    {"execution": execution, "plan": payload},
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
             )
-        )
+        else:
+            print(
+                f"Removal run {result.run_id}: "
+                f"applied={'yes' if result.applied else 'no'}, "
+                f"status={result.run_status}, removed={result.removed}, "
+                f"already_absent={result.already_absent}, not_found={result.not_found}, "
+                f"failed={result.failed}, stale={result.stale}, remaining={result.remaining}"
+            )
         return 0 if result.failed == 0 and result.stale == 0 else 1
     finally:
         if client is not None:

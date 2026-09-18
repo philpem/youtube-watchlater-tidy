@@ -95,7 +95,8 @@ watchlater-remove execute   dry-run or explicitly apply a persisted removal plan
 
 Removal plan IDs work like playlist plan IDs: use the top-level `run_id` printed by
 `watchlater-remove plan`. A destructive execution requires both `--apply` and
-`--confirm-remove`.
+`--confirm-remove`. `execute` prints a concise summary by default; add `--json` for
+the full machine-readable execution result and plan.
 
 ## Identity placeholders used in the guides
 
