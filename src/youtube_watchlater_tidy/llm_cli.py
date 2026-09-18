@@ -567,7 +567,7 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             partial = incomplete_annotation_run_id(
                 conn,
                 snapshot_id=snapshot_id,
-                provider_sha256=provider_sha,
+                requested_model=provider.model,
                 prompt_sha256=prompt.sha256,
                 input_sha256=input_sha,
                 videos=videos,
