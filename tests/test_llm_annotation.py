@@ -1053,7 +1053,10 @@ Telecoms = "Telephony, radio, networking and modems."
         self.assertEqual(coalesced.copied_batches, 1)
         self.assertEqual(coalesced.copied_videos, 1)
         self.assertEqual(coalesced.source_run_ids, (source,))
-        self.assertEqual(annotation_completed_batch_indexes_from_payload(payload), {0, 1})
+        self.assertEqual(
+            {batch["batch_index"] for batch in payload["batches"]},
+            {0, 1},
+        )
         self.assertEqual(payload["batches"][0]["provider"], self.provider.name)
         self.assertEqual(payload["batches"][1]["provider"], alternate.name)
         self.assertEqual(payload["batches"][1]["requested_model"], alternate.model)
@@ -1174,12 +1177,10 @@ Telecoms = "Telephony, radio, networking and modems."
                 batch_size=1,
                 required_context={"stage": "semantic_annotation"},
             )
+            completed = annotation_completed_batch_indexes(conn, destination)
 
         self.assertEqual(coalesced.copied_batches, 0)
-        self.assertEqual(
-            annotation_completed_batch_indexes(conn=open_catalogue_for_assertion(self.db_path), run_id=destination),
-            {0},
-        )
+        self.assertEqual(completed, {0})
 
     def test_annotation_resume_skips_checkpointed_batches(self) -> None:
         videos = [
