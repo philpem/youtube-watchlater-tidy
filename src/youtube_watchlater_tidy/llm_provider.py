@@ -126,17 +126,17 @@ def _message_text_content(
             )
         return "".join(text_parts)
 
-    # Some reasoning/provider implementations return no visible content when the
-    # completion exhausts its output budget. Preserve that finish reason so the
-    # caller can use its adaptive batch-splitting recovery.
-    if content is None and finish_reason == "length":
-        return ""
-
     refusal = message.get("refusal")
     if isinstance(refusal, str) and refusal.strip():
         raise RuntimeError(
             f"provider {provider.name!r} refused the request: {refusal.strip()[:500]}"
         )
+
+    # Some reasoning/provider implementations return no visible content when the
+    # completion exhausts its output budget. Preserve that finish reason so the
+    # caller can use its adaptive batch-splitting recovery.
+    if content is None and finish_reason == "length":
+        return ""
 
     model_detail = f"; model={response_model!r}" if response_model else ""
     finish_detail = (
