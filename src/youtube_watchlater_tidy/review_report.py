@@ -279,7 +279,7 @@ footer {{ margin-top: 1rem; font-size: .8rem; opacity: .8; }}
 <label>Rows/page <select id="pageSize"><option>50</option><option selected>100</option><option>250</option><option>500</option></select></label>
 <button id="firstPage" type="button">« First</button>
 <button id="previousPage" type="button">‹ Previous</button>
-<span id="pageStatus"></span>
+<span id="pageStatus" aria-live="polite"></span>
 <button id="nextPage" type="button">Next ›</button>
 <button id="lastPage" type="button">Last »</button>
 </div>
