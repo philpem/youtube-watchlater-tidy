@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .llm_config import ProviderConfig
+from .llm_diagnostics import active_diagnostic_log, new_request_id
 from .progress import ProgressCallback, ProgressEvent
 
 
@@ -205,16 +206,98 @@ def chat(
         json_schema=json_schema,
     )
     request = Request(url, data=payload, headers=headers, method="POST")
+    diagnostics = active_diagnostic_log()
+    request_id = new_request_id()
+    authorization = headers.get("Authorization", "")
+    api_key = (
+        authorization.removeprefix("Bearer ").strip()
+        if authorization.startswith("Bearer ")
+        else ""
+    )
+    diagnostic_secrets = tuple(
+        secret for secret in (api_key, authorization) if secret
+    )
+    request_body = json.loads(payload.decode("utf-8"))
 
     attempts = provider.retries + 1
     last_error: Exception | None = None
     for attempt in range(attempts):
         retry_detail: str | None = None
+        if diagnostics is not None:
+            diagnostics.write(
+                "request",
+                {
+                    "request_id": request_id,
+                    "attempt": attempt + 1,
+                    "attempts": attempts,
+                    "provider": provider.name,
+                    "configured_model": provider.model,
+                    "url": url,
+                    "headers": headers,
+                    "body": request_body,
+                },
+                secrets=diagnostic_secrets,
+            )
         try:
             with opener(request, timeout=provider.timeout) as response:
-                return _parse_chat_response(response.read(), provider)
+                response_payload = response.read()
+                status = getattr(response, "status", getattr(response, "code", None))
+                try:
+                    parsed = _parse_chat_response(response_payload, provider)
+                except Exception as exc:
+                    if diagnostics is not None:
+                        diagnostics.write(
+                            "response",
+                            {
+                                "request_id": request_id,
+                                "attempt": attempt + 1,
+                                "provider": provider.name,
+                                "configured_model": provider.model,
+                                "status": status,
+                                "raw_body": response_payload.decode(
+                                    "utf-8", errors="replace"
+                                ),
+                                "parse_error": f"{type(exc).__name__}: {exc}",
+                            },
+                            secrets=diagnostic_secrets,
+                        )
+                    raise
+                if diagnostics is not None:
+                    diagnostics.write(
+                        "response",
+                        {
+                            "request_id": request_id,
+                            "attempt": attempt + 1,
+                            "provider": provider.name,
+                            "configured_model": provider.model,
+                            "response_model": parsed.model,
+                            "status": status,
+                            "finish_reason": parsed.finish_reason,
+                            "usage": parsed.usage,
+                            "raw_body": response_payload.decode(
+                                "utf-8", errors="replace"
+                            ),
+                        },
+                        secrets=diagnostic_secrets,
+                    )
+                return parsed
         except HTTPError as exc:
             last_error = exc
+            error_body = exc.read() if hasattr(exc, "read") else b""
+            if diagnostics is not None:
+                diagnostics.write(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "attempt": attempt + 1,
+                        "provider": provider.name,
+                        "configured_model": provider.model,
+                        "status": exc.code,
+                        "error": f"HTTP {exc.code}: {exc.reason}",
+                        "raw_body": error_body.decode("utf-8", errors="replace"),
+                    },
+                    secrets=diagnostic_secrets,
+                )
             retryable = exc.code == 429 or 500 <= exc.code < 600
             if not retryable or attempt + 1 >= attempts:
                 detail = "rate limited" if exc.code == 429 else f"HTTP {exc.code}"
@@ -224,6 +307,18 @@ def chat(
             retry_detail = "rate limited" if exc.code == 429 else f"HTTP {exc.code}"
         except URLError as exc:
             last_error = exc
+            if diagnostics is not None:
+                diagnostics.write(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "attempt": attempt + 1,
+                        "provider": provider.name,
+                        "configured_model": provider.model,
+                        "error": f"URLError: {exc.reason}",
+                    },
+                    secrets=diagnostic_secrets,
+                )
             if attempt + 1 >= attempts:
                 raise RuntimeError(
                     f"provider {provider.name!r} request failed: {exc.reason}"
@@ -231,11 +326,36 @@ def chat(
             retry_detail = f"network error: {exc.reason}"
         except TimeoutError as exc:
             last_error = exc
+            if diagnostics is not None:
+                diagnostics.write(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "attempt": attempt + 1,
+                        "provider": provider.name,
+                        "configured_model": provider.model,
+                        "error": "TimeoutError: request timed out",
+                    },
+                    secrets=diagnostic_secrets,
+                )
             if attempt + 1 >= attempts:
                 raise RuntimeError(f"provider {provider.name!r} request timed out") from exc
             retry_detail = "request timed out"
 
         delay = float(2**attempt)
+        if diagnostics is not None:
+            diagnostics.write(
+                "retry",
+                {
+                    "request_id": request_id,
+                    "attempt": attempt + 1,
+                    "provider": provider.name,
+                    "configured_model": provider.model,
+                    "detail": retry_detail,
+                    "delay_seconds": delay,
+                },
+                secrets=diagnostic_secrets,
+            )
         if progress is not None:
             progress(
                 ProgressEvent(
