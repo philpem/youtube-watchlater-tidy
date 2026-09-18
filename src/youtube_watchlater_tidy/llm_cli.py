@@ -29,6 +29,7 @@ from .llm_classification import (
     evidence_hash,
 )
 from .llm_config import load_project_config
+from .llm_diagnostics import use_diagnostic_log
 from .llm_prompt import CLASSIFICATION_SCHEMA, render_prompt, render_prompt_text
 from .llm_provider import chat, parse_json_content
 from .llm_refinement import (
@@ -97,6 +98,11 @@ def _parser() -> argparse.ArgumentParser:
 
     probe = sub.add_parser("probe", help="make a small structured-output test request")
     probe.add_argument("--provider")
+    probe.add_argument(
+        "--llm-log",
+        type=Path,
+        help="append redacted LLM request/response diagnostics as JSON Lines",
+    )
     add_progress_argument(probe, include_no_progress=True)
 
     classify_parser = sub.add_parser(
@@ -110,6 +116,11 @@ def _parser() -> argparse.ArgumentParser:
     classify_parser.add_argument("--selection", type=int)
     classify_parser.add_argument("--limit", type=int)
     classify_parser.add_argument("--batch-size", type=int, default=10)
+    classify_parser.add_argument(
+        "--llm-log",
+        type=Path,
+        help="append redacted LLM request/response diagnostics as JSON Lines",
+    )
     classify_parser.add_argument(
         "--refresh",
         action="store_true",
@@ -138,6 +149,11 @@ def _parser() -> argparse.ArgumentParser:
     annotate_parser.add_argument("--selection", type=int)
     annotate_parser.add_argument("--limit", type=int)
     annotate_parser.add_argument("--batch-size", type=int, default=10)
+    annotate_parser.add_argument(
+        "--llm-log",
+        type=Path,
+        help="append redacted LLM request/response diagnostics as JSON Lines",
+    )
     annotate_parser.add_argument(
         "--scope",
         choices=("all", "remaining"),
@@ -213,6 +229,11 @@ def _parser() -> argparse.ArgumentParser:
     refine_parser.add_argument("--prompt-file", type=Path)
     refine_parser.add_argument("--limit", type=int)
     refine_parser.add_argument("--batch-size", type=int, default=5)
+    refine_parser.add_argument(
+        "--llm-log",
+        type=Path,
+        help="append redacted LLM request/response diagnostics as JSON Lines",
+    )
     refine_parser.add_argument(
         "--max-description-chars",
         type=int,
@@ -918,26 +939,34 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "providers":
-            return _cmd_providers(args)
-        if args.command == "prompt":
-            return _cmd_prompt(args)
-        if args.command == "probe":
-            return _cmd_probe(args)
-        if args.command == "classify":
-            return _cmd_classify(args)
-        if args.command == "annotate":
-            return _cmd_annotate(args)
-        if args.command == "taxonomies":
-            return _cmd_taxonomies(args)
-        if args.command == "taxonomy":
-            return _cmd_taxonomy(args)
-        if args.command == "annotation-results":
-            return _cmd_annotation_results(args)
-        if args.command == "refine-description":
-            return _cmd_refine_description(args)
-        if args.command == "results":
-            return _cmd_results(args)
+        llm_log = getattr(args, "llm_log", None)
+        if llm_log is not None:
+            print(
+                f"LLM diagnostics: appending redacted request/response records to {llm_log}",
+                file=sys.stderr,
+                flush=True,
+            )
+        with use_diagnostic_log(llm_log):
+            if args.command == "providers":
+                return _cmd_providers(args)
+            if args.command == "prompt":
+                return _cmd_prompt(args)
+            if args.command == "probe":
+                return _cmd_probe(args)
+            if args.command == "classify":
+                return _cmd_classify(args)
+            if args.command == "annotate":
+                return _cmd_annotate(args)
+            if args.command == "taxonomies":
+                return _cmd_taxonomies(args)
+            if args.command == "taxonomy":
+                return _cmd_taxonomy(args)
+            if args.command == "annotation-results":
+                return _cmd_annotation_results(args)
+            if args.command == "refine-description":
+                return _cmd_refine_description(args)
+            if args.command == "results":
+                return _cmd_results(args)
     except KeyboardInterrupt:
         print("watchlater-llm: interrupted", file=sys.stderr)
         return 130

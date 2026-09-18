@@ -232,3 +232,27 @@ watchlater-llm --config watchlater.toml probe --provider openrouter
 
 The probe only verifies the provider/request path. Classification and catalogue writes are
 implemented separately so provider/config behavior can be reviewed independently.
+
+## Provider diagnostics
+
+Provider-backed commands can append redacted request/response diagnostics as JSON Lines:
+
+```bash
+watchlater-llm --config watchlater.toml annotate \
+    --scope remaining --taxonomy saved --taxonomy-id 4 \
+    --llm-log llm-diagnostics.jsonl
+```
+
+The log records each request, raw response, provider/model metadata, finish reason, usage,
+HTTP/provider errors and retry delays. Concurrent requests carry a request ID so request
+and response records can be paired.
+
+Authorization/API-key, token, secret and cookie header values are replaced with
+`<redacted>`, and the configured API-key value is also removed if a provider echoes it
+elsewhere in a logged record.
+
+Diagnostic logs are intentionally opt-in: the request body contains prompts, video
+metadata and interest-profile text, and raw responses contain model output. Treat the log
+as private even though credentials are redacted.
+
+`watchlater-llm-transcript` supports the same `--llm-log FILE` option.

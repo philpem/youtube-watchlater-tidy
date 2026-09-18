@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .llm_config import ProviderConfig
+from .llm_diagnostics import active_diagnostic_log, new_request_id
 from .progress import ProgressCallback, ProgressEvent
 
 
@@ -91,6 +92,63 @@ def build_chat_request(
     return url, headers, json.dumps(body, ensure_ascii=False).encode("utf-8")
 
 
+def _message_text_content(
+    message: dict[str, Any],
+    *,
+    provider: ProviderConfig,
+    finish_reason: str | None,
+    response_model: str | None,
+) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        unsupported: list[str] = []
+        for index, part in enumerate(content):
+            if isinstance(part, str):
+                text_parts.append(part)
+                continue
+            if not isinstance(part, dict):
+                unsupported.append(f"{index}:{type(part).__name__}")
+                continue
+            part_type = part.get("type")
+            text = part.get("text")
+            if part_type in {"text", "output_text"} and isinstance(text, str):
+                text_parts.append(text)
+                continue
+            unsupported.append(f"{index}:{part_type or 'unknown'}")
+        if unsupported:
+            raise RuntimeError(
+                f"provider {provider.name!r} response contains unsupported content "
+                f"part(s): {', '.join(unsupported)}"
+            )
+        return "".join(text_parts)
+
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal.strip():
+        raise RuntimeError(
+            f"provider {provider.name!r} refused the request: {refusal.strip()[:500]}"
+        )
+
+    # Some reasoning/provider implementations return no visible content when the
+    # completion exhausts its output budget. Preserve that finish reason so the
+    # caller can use its adaptive batch-splitting recovery.
+    if content is None and finish_reason == "length":
+        return ""
+
+    model_detail = f"; model={response_model!r}" if response_model else ""
+    finish_detail = (
+        f"; finish_reason={finish_reason!r}" if finish_reason is not None else ""
+    )
+    keys = ", ".join(sorted(str(key) for key in message))
+    raise RuntimeError(
+        f"provider {provider.name!r} response has no supported text content"
+        f"{finish_detail}{model_detail}; message keys=[{keys}]"
+    )
+
+
 def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatResponse:
     try:
         raw = json.loads(payload)
@@ -107,9 +165,6 @@ def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatRespon
     message = choices[0].get("message")
     if not isinstance(message, dict):
         raise RuntimeError(f"provider {provider.name!r} response has no choices[0].message")
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise RuntimeError(f"provider {provider.name!r} response content is not text")
 
     finish_reason = choices[0].get("finish_reason")
     if not isinstance(finish_reason, str):
@@ -119,10 +174,17 @@ def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatRespon
     if not isinstance(usage, dict):
         usage = {}
     model = raw.get("model")
+    response_model = model if isinstance(model, str) else None
+    content = _message_text_content(
+        message,
+        provider=provider,
+        finish_reason=finish_reason,
+        response_model=response_model,
+    )
     return ChatResponse(
         content=content,
         usage=dict(usage),
-        model=model if isinstance(model, str) else None,
+        model=response_model,
         raw=raw,
         finish_reason=finish_reason,
     )
@@ -144,16 +206,98 @@ def chat(
         json_schema=json_schema,
     )
     request = Request(url, data=payload, headers=headers, method="POST")
+    diagnostics = active_diagnostic_log()
+    request_id = new_request_id()
+    authorization = headers.get("Authorization", "")
+    api_key = (
+        authorization.removeprefix("Bearer ").strip()
+        if authorization.startswith("Bearer ")
+        else ""
+    )
+    diagnostic_secrets = tuple(
+        secret for secret in (api_key, authorization) if secret
+    )
+    request_body = json.loads(payload.decode("utf-8"))
 
     attempts = provider.retries + 1
     last_error: Exception | None = None
     for attempt in range(attempts):
         retry_detail: str | None = None
+        if diagnostics is not None:
+            diagnostics.write(
+                "request",
+                {
+                    "request_id": request_id,
+                    "attempt": attempt + 1,
+                    "attempts": attempts,
+                    "provider": provider.name,
+                    "configured_model": provider.model,
+                    "url": url,
+                    "headers": headers,
+                    "body": request_body,
+                },
+                secrets=diagnostic_secrets,
+            )
         try:
             with opener(request, timeout=provider.timeout) as response:
-                return _parse_chat_response(response.read(), provider)
+                response_payload = response.read()
+                status = getattr(response, "status", getattr(response, "code", None))
+                try:
+                    parsed = _parse_chat_response(response_payload, provider)
+                except Exception as exc:
+                    if diagnostics is not None:
+                        diagnostics.write(
+                            "response",
+                            {
+                                "request_id": request_id,
+                                "attempt": attempt + 1,
+                                "provider": provider.name,
+                                "configured_model": provider.model,
+                                "status": status,
+                                "raw_body": response_payload.decode(
+                                    "utf-8", errors="replace"
+                                ),
+                                "parse_error": f"{type(exc).__name__}: {exc}",
+                            },
+                            secrets=diagnostic_secrets,
+                        )
+                    raise
+                if diagnostics is not None:
+                    diagnostics.write(
+                        "response",
+                        {
+                            "request_id": request_id,
+                            "attempt": attempt + 1,
+                            "provider": provider.name,
+                            "configured_model": provider.model,
+                            "response_model": parsed.model,
+                            "status": status,
+                            "finish_reason": parsed.finish_reason,
+                            "usage": parsed.usage,
+                            "raw_body": response_payload.decode(
+                                "utf-8", errors="replace"
+                            ),
+                        },
+                        secrets=diagnostic_secrets,
+                    )
+                return parsed
         except HTTPError as exc:
             last_error = exc
+            error_body = exc.read() if hasattr(exc, "read") else b""
+            if diagnostics is not None:
+                diagnostics.write(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "attempt": attempt + 1,
+                        "provider": provider.name,
+                        "configured_model": provider.model,
+                        "status": exc.code,
+                        "error": f"HTTP {exc.code}: {exc.reason}",
+                        "raw_body": error_body.decode("utf-8", errors="replace"),
+                    },
+                    secrets=diagnostic_secrets,
+                )
             retryable = exc.code == 429 or 500 <= exc.code < 600
             if not retryable or attempt + 1 >= attempts:
                 detail = "rate limited" if exc.code == 429 else f"HTTP {exc.code}"
@@ -163,6 +307,18 @@ def chat(
             retry_detail = "rate limited" if exc.code == 429 else f"HTTP {exc.code}"
         except URLError as exc:
             last_error = exc
+            if diagnostics is not None:
+                diagnostics.write(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "attempt": attempt + 1,
+                        "provider": provider.name,
+                        "configured_model": provider.model,
+                        "error": f"URLError: {exc.reason}",
+                    },
+                    secrets=diagnostic_secrets,
+                )
             if attempt + 1 >= attempts:
                 raise RuntimeError(
                     f"provider {provider.name!r} request failed: {exc.reason}"
@@ -170,11 +326,36 @@ def chat(
             retry_detail = f"network error: {exc.reason}"
         except TimeoutError as exc:
             last_error = exc
+            if diagnostics is not None:
+                diagnostics.write(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "attempt": attempt + 1,
+                        "provider": provider.name,
+                        "configured_model": provider.model,
+                        "error": "TimeoutError: request timed out",
+                    },
+                    secrets=diagnostic_secrets,
+                )
             if attempt + 1 >= attempts:
                 raise RuntimeError(f"provider {provider.name!r} request timed out") from exc
             retry_detail = "request timed out"
 
         delay = float(2**attempt)
+        if diagnostics is not None:
+            diagnostics.write(
+                "retry",
+                {
+                    "request_id": request_id,
+                    "attempt": attempt + 1,
+                    "provider": provider.name,
+                    "configured_model": provider.model,
+                    "detail": retry_detail,
+                    "delay_seconds": delay,
+                },
+                secrets=diagnostic_secrets,
+            )
         if progress is not None:
             progress(
                 ProgressEvent(

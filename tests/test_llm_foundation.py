@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from youtube_watchlater_tidy.llm_cli import main as llm_main
 from youtube_watchlater_tidy.llm_config import ProviderConfig, load_project_config
+from youtube_watchlater_tidy.llm_diagnostics import use_diagnostic_log
 from youtube_watchlater_tidy.llm_prompt import CLASSIFICATION_SCHEMA, render_prompt
 from youtube_watchlater_tidy.llm_provider import ChatResponse, build_chat_request, chat, parse_json_content
 
@@ -190,6 +191,228 @@ guidance = "Prefer review when evidence is weak."
         self.assertEqual(seen["url"], "https://example.invalid/v1/chat/completions")
         self.assertEqual(parse_json_content(response, provider.name), {"ok": True})
         self.assertEqual(response.usage["prompt_tokens"], 12)
+
+    def test_llm_diagnostic_log_records_request_response_and_redacts_api_key(self) -> None:
+        os.environ["WATCHLATER_TEST_KEY"] = "super-secret-api-key"
+        provider = ProviderConfig(
+            name="test",
+            preset="generic",
+            base_url="https://example.invalid/v1",
+            model="model-a",
+            api_key_env="WATCHLATER_TEST_KEY",
+            retries=0,
+        )
+        log_path = self.root / "llm.jsonl"
+
+        def opener(request, timeout):
+            return _FakeResponse(
+                {
+                    "model": "model-a",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": '{"ok": true, "echo": "super-secret-api-key"}'
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+                }
+            )
+
+        with use_diagnostic_log(log_path):
+            response = chat(
+                provider,
+                [{"role": "user", "content": "probe"}],
+                opener=opener,
+            )
+
+        self.assertEqual(parse_json_content(response, provider.name)["ok"], True)
+        log_text = log_path.read_text(encoding="utf-8")
+        self.assertNotIn("super-secret-api-key", log_text)
+        self.assertIn("<redacted>", log_text)
+        records = [json.loads(line) for line in log_text.splitlines()]
+        self.assertEqual([record["event"] for record in records], ["request", "response"])
+        self.assertEqual(records[0]["headers"]["Authorization"], "<redacted>")
+        self.assertEqual(records[0]["body"]["model"], "model-a")
+        self.assertEqual(records[1]["finish_reason"], "stop")
+        self.assertEqual(records[1]["usage"]["prompt_tokens"], 12)
+        self.assertEqual(records[0]["request_id"], records[1]["request_id"])
+
+    def test_llm_diagnostic_log_preserves_raw_failure_response(self) -> None:
+        provider = ProviderConfig(
+            name="test",
+            preset="generic",
+            base_url="https://example.invalid/v1",
+            model="model-a",
+            retries=0,
+        )
+        log_path = self.root / "llm-failure.jsonl"
+
+        def opener(request, timeout):
+            return _FakeResponse(
+                {
+                    "model": "model-a",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": None},
+                        }
+                    ],
+                }
+            )
+
+        with use_diagnostic_log(log_path):
+            with self.assertRaisesRegex(RuntimeError, "no supported text content"):
+                chat(
+                    provider,
+                    [{"role": "user", "content": "probe"}],
+                    opener=opener,
+                )
+
+        records = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual([record["event"] for record in records], ["request", "response"])
+        self.assertIn('"content": null', records[1]["raw_body"])
+        self.assertIn("parse_error", records[1])
+
+    def test_chat_accepts_typed_text_content_parts(self) -> None:
+        provider = ProviderConfig(
+            name="openrouter",
+            preset="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="example/model",
+            retries=0,
+        )
+
+        def opener(request, timeout):
+            return _FakeResponse(
+                {
+                    "model": "example/model",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": '{"ok":'},
+                                    {"type": "output_text", "text": "true}"},
+                                ],
+                            },
+                        }
+                    ],
+                }
+            )
+
+        response = chat(
+            provider,
+            [{"role": "user", "content": "probe"}],
+            opener=opener,
+        )
+        self.assertEqual(response.content, '{"ok":true}')
+        self.assertEqual(parse_json_content(response, provider.name), {"ok": True})
+
+    def test_chat_preserves_length_finish_with_null_content(self) -> None:
+        provider = ProviderConfig(
+            name="openrouter",
+            preset="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="reasoning/model",
+            retries=0,
+        )
+
+        def opener(request, timeout):
+            return _FakeResponse(
+                {
+                    "model": "reasoning/model",
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "reasoning": "internal reasoning omitted",
+                            },
+                        }
+                    ],
+                }
+            )
+
+        response = chat(
+            provider,
+            [{"role": "user", "content": "probe"}],
+            opener=opener,
+        )
+        self.assertEqual(response.content, "")
+        self.assertEqual(response.finish_reason, "length")
+        self.assertEqual(response.model, "reasoning/model")
+
+    def test_chat_reports_provider_refusal_with_null_content(self) -> None:
+        provider = ProviderConfig(
+            name="openrouter",
+            preset="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="example/model",
+            retries=0,
+        )
+
+        def opener(request, timeout):
+            return _FakeResponse(
+                {
+                    "model": "example/model",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "refusal": "Cannot comply with this request.",
+                            },
+                        }
+                    ],
+                }
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "refused the request"):
+            chat(
+                provider,
+                [{"role": "user", "content": "probe"}],
+                opener=opener,
+            )
+
+    def test_chat_rejects_unsupported_non_text_content_parts(self) -> None:
+        provider = ProviderConfig(
+            name="openrouter",
+            preset="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="example/model",
+            retries=0,
+        )
+
+        def opener(request, timeout):
+            return _FakeResponse(
+                {
+                    "model": "example/model",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "image_url", "image_url": {}}],
+                            },
+                        }
+                    ],
+                }
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported content part"):
+            chat(
+                provider,
+                [{"role": "user", "content": "probe"}],
+                opener=opener,
+            )
 
     def test_cli_keyboard_interrupt_exits_130_without_traceback(self) -> None:
         stderr = io.StringIO()
