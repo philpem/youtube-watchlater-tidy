@@ -1,0 +1,535 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .llm_classification import ClassificationEvidence, evidence_hash
+from .llm_config import ProjectConfig, ProviderConfig
+from .llm_prompt import render_prompt
+from .llm_provider import ChatResponse, chat, parse_json_content
+
+
+RESERVED_CATEGORIES = {
+    "Other": "Material that does not fit another configured category.",
+    "Unclear": "Insufficient evidence to assign a useful semantic category.",
+}
+
+ANNOTATION_SYSTEM_PROMPT = """You organise a user's YouTube Watch Later catalogue for human review.
+
+This task is semantic annotation, not decision making. Do not recommend keep/delete/archive/move
+actions. For each supplied video:
+- choose exactly one primary category from the supplied controlled vocabulary;
+- write a short, specific subject describing what the video is about;
+- assign 1 to 6 concise reusable tags;
+- identify the content type (for example tutorial, technical talk, repair, review, news, comedy);
+- give confidence in the semantic annotation.
+
+Tags must describe subject matter, not quality or recommended action. Prefer stable canonical names
+and lower-case tags. Avoid generic tags such as "video", "youtube", or "technology" when a more
+specific tag is available. Reuse the same tag wording for the same concept across videos.
+
+Use Other when the subject genuinely falls outside the vocabulary. Use Unclear when the available
+metadata is insufficient. Return only JSON matching the supplied schema. The video_id in each
+result must exactly match one supplied ID.
+"""
+
+TAXONOMY_SYSTEM_PROMPT = """Design a broad controlled category vocabulary for browsing a large
+YouTube Watch Later catalogue. Categories are navigation facets for human review, not quality
+judgements or recommended actions.
+
+Create a manageable set of broad, reusable categories. Merge near-synonyms and avoid categories
+that are merely one channel name, one individual video, a quality judgement, or a transient action.
+Names should normally be 1 to 4 words. Descriptions should clarify boundaries. Do not include
+Other or Unclear; the application adds those reserved fallbacks.
+
+Return only JSON matching the supplied schema.
+"""
+
+TAXONOMY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["categories"],
+    "properties": {
+        "categories": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 30,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "description"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+        }
+    },
+}
+
+
+@dataclass(frozen=True)
+class AnnotationPrompt:
+    system: str
+    interest_brief: str
+    profile_name: str | None
+    categories: dict[str, str]
+    sha256: str
+
+    def schema(self) -> dict[str, Any]:
+        return annotation_schema(self.categories)
+
+    def messages(self) -> list[dict[str, str]]:
+        vocabulary = "\n".join(
+            f"- {name}: {description}" for name, description in self.categories.items()
+        )
+        user_sections = [
+            "## Controlled category vocabulary\n" + vocabulary,
+            "## User interest context\n"
+            + (
+                self.interest_brief
+                or "No interest profile supplied. Categorise by subject matter only."
+            ),
+            "## Required annotation JSON schema\n"
+            + json.dumps(self.schema(), ensure_ascii=False, sort_keys=True),
+        ]
+        return [
+            {"role": "system", "content": self.system},
+            {"role": "user", "content": "\n\n".join(user_sections)},
+        ]
+
+
+@dataclass(frozen=True)
+class SemanticAnnotation:
+    video_id: str
+    primary_category: str
+    subject: str
+    tags: tuple[str, ...]
+    content_type: str
+    confidence: float
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "video_id": self.video_id,
+            "primary_category": self.primary_category,
+            "subject": self.subject,
+            "tags": list(self.tags),
+            "content_type": self.content_type,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass(frozen=True)
+class AnnotationBatchResult:
+    annotations: tuple[SemanticAnnotation, ...]
+    input_sha256: str
+    usage: dict[str, Any]
+    response_model: str | None
+
+
+@dataclass(frozen=True)
+class AnnotationRunResult:
+    annotations: tuple[SemanticAnnotation, ...]
+    batches: tuple[AnnotationBatchResult, ...]
+
+
+@dataclass(frozen=True)
+class TaxonomyDiscovery:
+    categories: dict[str, str]
+    input_sha256: str
+    prompt_sha256: str
+    usage: dict[str, Any]
+    response_model: str | None
+
+    def as_context(self) -> dict[str, Any]:
+        return {
+            "input_sha256": self.input_sha256,
+            "prompt_sha256": self.prompt_sha256,
+            "usage": self.usage,
+            "response_model": self.response_model,
+        }
+
+
+def _canonical_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def with_reserved_categories(categories: dict[str, str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    reserved_by_fold = {name.casefold(): name for name in RESERVED_CATEGORIES}
+    reserved_descriptions: dict[str, str] = dict(RESERVED_CATEGORIES)
+    seen: set[str] = set()
+
+    for raw_name, raw_description in categories.items():
+        name = str(raw_name).strip()
+        description = str(raw_description).strip()
+        if not name or not description:
+            raise ValueError("review category names and descriptions must be non-empty")
+        folded = name.casefold()
+        if folded in seen:
+            raise ValueError(f"duplicate review category {name!r}")
+        seen.add(folded)
+        if folded in reserved_by_fold:
+            canonical = reserved_by_fold[folded]
+            reserved_descriptions[canonical] = description
+        else:
+            result[name] = description
+
+    for name, description in reserved_descriptions.items():
+        result[name] = description
+    return result
+
+
+def annotation_schema(categories: dict[str, str]) -> dict[str, Any]:
+    names = list(categories)
+    if not names:
+        raise ValueError("annotation category vocabulary cannot be empty")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["annotations"],
+        "properties": {
+            "annotations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "video_id",
+                        "primary_category",
+                        "subject",
+                        "tags",
+                        "content_type",
+                        "confidence",
+                    ],
+                    "properties": {
+                        "video_id": {"type": "string"},
+                        "primary_category": {"type": "string", "enum": names},
+                        "subject": {"type": "string"},
+                        "tags": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 6,
+                            "items": {"type": "string"},
+                        },
+                        "content_type": {"type": "string"},
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                    },
+                },
+            }
+        },
+    }
+
+
+def render_annotation_prompt(
+    config: ProjectConfig,
+    categories: dict[str, str],
+    *,
+    interest_profile: str | None = None,
+    prompt_file: str | Path | None = None,
+) -> AnnotationPrompt:
+    base = render_prompt(
+        config,
+        interest_profile=interest_profile,
+        prompt_file=prompt_file,
+    )
+    controlled = with_reserved_categories(categories)
+    schema = annotation_schema(controlled)
+    digest = _canonical_hash(
+        {
+            "prompt_version": 1,
+            "system": ANNOTATION_SYSTEM_PROMPT,
+            "interest": base.interest_brief,
+            "categories": controlled,
+            "schema": schema,
+        }
+    )
+    return AnnotationPrompt(
+        system=ANNOTATION_SYSTEM_PROMPT,
+        interest_brief=base.interest_brief,
+        profile_name=base.profile_name,
+        categories=controlled,
+        sha256=digest,
+    )
+
+
+def build_annotation_messages(
+    prompt: AnnotationPrompt,
+    videos: list[ClassificationEvidence],
+) -> list[dict[str, str]]:
+    messages = prompt.messages()
+    messages.append(
+        {
+            "role": "user",
+            "content": "## Videos to annotate\n"
+            + json.dumps(
+                {"videos": [video.as_payload() for video in videos]},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        }
+    )
+    return messages
+
+
+def _string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"annotation field {field} must be a non-empty string")
+    return value.strip()
+
+
+def _score(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"annotation field {field} must be a number from 0 to 1")
+    result = float(value)
+    if not 0 <= result <= 1:
+        raise ValueError(f"annotation field {field} must be between 0 and 1")
+    return result
+
+
+def _normalise_tags(value: Any, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 6:
+        raise ValueError(f"annotation field {field} must contain 1 to 6 tags")
+    result: list[str] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        tag = _string(raw, f"{field}[{index}]").lstrip("#")
+        tag = " ".join(tag.casefold().split())
+        if not tag:
+            raise ValueError(f"annotation field {field}[{index}] must not be empty")
+        if tag not in seen:
+            seen.add(tag)
+            result.append(tag)
+    if not result:
+        raise ValueError(f"annotation field {field} must contain at least one tag")
+    return tuple(result)
+
+
+def validate_annotation_response(
+    value: dict[str, Any],
+    *,
+    expected_video_ids: list[str],
+    categories: set[str],
+) -> list[SemanticAnnotation]:
+    if set(value) != {"annotations"}:
+        raise ValueError("annotation response must contain only 'annotations'")
+    rows = value.get("annotations")
+    if not isinstance(rows, list):
+        raise ValueError("annotation response 'annotations' must be an array")
+
+    expected = list(expected_video_ids)
+    expected_set = set(expected)
+    if len(expected_set) != len(expected):
+        raise ValueError("expected video IDs contain duplicates")
+
+    required = {
+        "video_id",
+        "primary_category",
+        "subject",
+        "tags",
+        "content_type",
+        "confidence",
+    }
+    annotations: dict[str, SemanticAnnotation] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != required:
+            raise ValueError(f"annotation[{index}] has missing or unexpected fields")
+        video_id = _string(row["video_id"], f"annotations[{index}].video_id")
+        if video_id not in expected_set:
+            raise ValueError(f"annotation returned unexpected video_id {video_id!r}")
+        if video_id in annotations:
+            raise ValueError(f"annotation returned duplicate video_id {video_id!r}")
+
+        category = _string(row["primary_category"], f"{video_id}.primary_category")
+        if category not in categories:
+            raise ValueError(
+                f"{video_id}.primary_category {category!r} is not in the controlled vocabulary"
+            )
+        annotations[video_id] = SemanticAnnotation(
+            video_id=video_id,
+            primary_category=category,
+            subject=_string(row["subject"], f"{video_id}.subject"),
+            tags=_normalise_tags(row["tags"], f"{video_id}.tags"),
+            content_type=_string(row["content_type"], f"{video_id}.content_type"),
+            confidence=_score(row["confidence"], f"{video_id}.confidence"),
+        )
+
+    missing = [video_id for video_id in expected if video_id not in annotations]
+    if missing:
+        raise ValueError("annotation response omitted video ID(s): " + ", ".join(missing))
+    return [annotations[video_id] for video_id in expected]
+
+
+def _batches(
+    videos: list[ClassificationEvidence], batch_size: int
+) -> list[list[ClassificationEvidence]]:
+    if batch_size < 1:
+        raise ValueError("--batch-size must be at least 1")
+    return [videos[index : index + batch_size] for index in range(0, len(videos), batch_size)]
+
+
+def _annotate_batch(
+    provider: ProviderConfig,
+    prompt: AnnotationPrompt,
+    videos: list[ClassificationEvidence],
+) -> AnnotationBatchResult:
+    response: ChatResponse = chat(
+        provider,
+        build_annotation_messages(prompt, videos),
+        json_schema=prompt.schema(),
+    )
+    value = parse_json_content(response, provider.name)
+    annotations = validate_annotation_response(
+        value,
+        expected_video_ids=[video.video_id for video in videos],
+        categories=set(prompt.categories),
+    )
+    return AnnotationBatchResult(
+        annotations=tuple(annotations),
+        input_sha256=evidence_hash(videos),
+        usage=response.usage,
+        response_model=response.model,
+    )
+
+
+def annotate(
+    provider: ProviderConfig,
+    prompt: AnnotationPrompt,
+    videos: list[ClassificationEvidence],
+    *,
+    batch_size: int = 10,
+) -> AnnotationRunResult:
+    batches = _batches(videos, batch_size)
+    if not batches:
+        return AnnotationRunResult(annotations=(), batches=())
+
+    results: dict[int, AnnotationBatchResult] = {}
+    with ThreadPoolExecutor(max_workers=provider.concurrency) as executor:
+        futures = {
+            executor.submit(_annotate_batch, provider, prompt, batch): index
+            for index, batch in enumerate(batches)
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+
+    ordered_batches = tuple(results[index] for index in range(len(batches)))
+    annotations = tuple(
+        annotation for batch in ordered_batches for annotation in batch.annotations
+    )
+    return AnnotationRunResult(annotations=annotations, batches=ordered_batches)
+
+
+def even_sample(
+    videos: list[ClassificationEvidence],
+    limit: int,
+) -> list[ClassificationEvidence]:
+    if limit < 1:
+        raise ValueError("--taxonomy-sample must be at least 1")
+    if len(videos) <= limit:
+        return list(videos)
+    if limit == 1:
+        return [videos[len(videos) // 2]]
+    indexes = {
+        round(index * (len(videos) - 1) / (limit - 1))
+        for index in range(limit)
+    }
+    return [videos[index] for index in sorted(indexes)]
+
+
+def _taxonomy_payload(videos: list[ClassificationEvidence]) -> list[dict[str, Any]]:
+    return [
+        {
+            "video_id": video.video_id,
+            "title": video.recovered_title or video.dearrow_title or video.original_title,
+            "channel": video.channel,
+        }
+        for video in videos
+    ]
+
+
+def discover_taxonomy(
+    provider: ProviderConfig,
+    videos: list[ClassificationEvidence],
+    *,
+    interest_brief: str = "",
+    max_categories: int = 20,
+) -> TaxonomyDiscovery:
+    if not videos:
+        raise ValueError("cannot discover a taxonomy from an empty video set")
+    if not 3 <= max_categories <= 30:
+        raise ValueError("--max-categories must be between 3 and 30")
+
+    prompt_hash = _canonical_hash(
+        {
+            "prompt_version": 1,
+            "system": TAXONOMY_SYSTEM_PROMPT,
+            "interest": interest_brief,
+            "max_categories": max_categories,
+            "schema": TAXONOMY_SCHEMA,
+        }
+    )
+    payload = _taxonomy_payload(videos)
+    input_sha = _canonical_hash(payload)
+    response = chat(
+        provider,
+        [
+            {"role": "system", "content": TAXONOMY_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Create no more than {max_categories} broad categories.\n\n"
+                    "## User interest context\n"
+                    + (interest_brief or "No interest profile supplied.")
+                    + "\n\n## Catalogue sample\n"
+                    + json.dumps({"videos": payload}, ensure_ascii=False, sort_keys=True)
+                    + "\n\n## Required JSON schema\n"
+                    + json.dumps(TAXONOMY_SCHEMA, ensure_ascii=False, sort_keys=True)
+                ),
+            },
+        ],
+        json_schema=TAXONOMY_SCHEMA,
+    )
+    value = parse_json_content(response, provider.name)
+    if set(value) != {"categories"} or not isinstance(value.get("categories"), list):
+        raise ValueError("taxonomy response must contain only a categories array")
+
+    categories: dict[str, str] = {}
+    seen: set[str] = set()
+    for index, row in enumerate(value["categories"]):
+        if not isinstance(row, dict) or set(row) != {"name", "description"}:
+            raise ValueError(f"taxonomy category[{index}] has missing or unexpected fields")
+        name = _string(row["name"], f"categories[{index}].name")
+        description = _string(row["description"], f"categories[{index}].description")
+        folded = name.casefold()
+        if folded in {name.casefold() for name in RESERVED_CATEGORIES}:
+            continue
+        if folded in seen:
+            raise ValueError(f"taxonomy returned duplicate category {name!r}")
+        seen.add(folded)
+        categories[name] = description
+
+    if len(categories) < 3:
+        raise ValueError("taxonomy discovery returned fewer than 3 usable categories")
+    if len(categories) > max_categories:
+        raise ValueError(
+            f"taxonomy discovery returned {len(categories)} categories; maximum is {max_categories}"
+        )
+    return TaxonomyDiscovery(
+        categories=with_reserved_categories(categories),
+        input_sha256=input_sha,
+        prompt_sha256=prompt_hash,
+        usage=response.usage,
+        response_model=response.model,
+    )
