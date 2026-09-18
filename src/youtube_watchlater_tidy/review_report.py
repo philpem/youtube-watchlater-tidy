@@ -77,7 +77,13 @@ def review_rows(
                lc.destination_confidence AS llm_destination_confidence,
                lc.destination_reason AS llm_destination_reason,
                lc.needs_description AS llm_needs_description,
-               lc.needs_transcript AS llm_needs_transcript
+               lc.needs_transcript AS llm_needs_transcript,
+               la.run_id AS annotation_run_id,
+               la.primary_category AS annotation_primary_category,
+               la.subject AS annotation_subject,
+               la.tags_json AS annotation_tags_json,
+               la.content_type AS annotation_content_type,
+               la.confidence AS annotation_confidence
         FROM snapshot_entries AS e
         LEFT JOIN preferred_metadata AS m ON m.video_id = e.video_id
         LEFT JOIN archive_lookups AS a
@@ -100,6 +106,17 @@ def review_rows(
                 AND r2.snapshot_id = e.snapshot_id
                 AND r2.status = 'complete'
               ORDER BY c2.id DESC
+              LIMIT 1
+          )
+        LEFT JOIN llm_annotations AS la
+          ON la.id = (
+              SELECT a2.id
+              FROM llm_annotations AS a2
+              JOIN llm_annotation_runs AS ar2 ON ar2.id = a2.run_id
+              WHERE a2.video_id = e.video_id
+                AND ar2.snapshot_id = e.snapshot_id
+                AND ar2.status = 'complete'
+              ORDER BY a2.id DESC
               LIMIT 1
           )
         WHERE e.snapshot_id = ?
@@ -206,6 +223,23 @@ def review_rows(
                 "needs_transcript": bool(row["llm_needs_transcript"]),
             }
 
+        annotation = None
+        if row["annotation_run_id"] is not None:
+            try:
+                annotation_tags = json.loads(row["annotation_tags_json"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                annotation_tags = []
+            if not isinstance(annotation_tags, list):
+                annotation_tags = []
+            annotation = {
+                "run_id": int(row["annotation_run_id"]),
+                "primary_category": row["annotation_primary_category"],
+                "subject": row["annotation_subject"],
+                "tags": [str(tag) for tag in annotation_tags if isinstance(tag, str)],
+                "content_type": row["annotation_content_type"],
+                "confidence": row["annotation_confidence"],
+            }
+
         result.append(
             {
                 "position": int(row["position"]),
@@ -225,6 +259,7 @@ def review_rows(
                 "thumbnail": _thumbnail(row["thumbnails_json"]),
                 "current_decision": current,
                 "llm": llm,
+                "annotation": annotation,
             }
         )
     return snapshot_id, result
