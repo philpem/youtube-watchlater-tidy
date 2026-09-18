@@ -352,12 +352,18 @@ def store_annotation_run(
     offset = 0
     for batch_index, batch in enumerate(result.batches):
         batch_videos = videos[offset : offset + len(batch.annotations)]
+        normalized_batch = AnnotationBatchResult(
+            annotations=batch.annotations,
+            input_sha256=evidence_hash(batch_videos),
+            usage=batch.usage,
+            response_model=batch.response_model,
+        )
         store_annotation_batch(
             conn,
             run_id=run_id,
             batch_index=batch_index,
             videos=batch_videos,
-            result=batch,
+            result=normalized_batch,
         )
         offset += len(batch.annotations)
     complete_annotation_run(conn, run_id)
