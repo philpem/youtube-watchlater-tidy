@@ -155,36 +155,76 @@ def cached_annotation_run_id(
     return None
 
 
+def reusable_annotation_run_id(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    prompt_sha256: str,
+    input_sha256: str,
+    required_context: dict[str, Any] | None = None,
+) -> int | None:
+    """Return the newest complete run with the same semantic annotation inputs.
+
+    Provider/model are deliberately not part of semantic identity. Use --refresh when
+    a fresh annotation pass is wanted with a different execution provider or model.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT id, provider_config_json
+        FROM llm_annotation_runs
+        WHERE snapshot_id = ?
+          AND prompt_sha256 = ?
+          AND input_sha256 = ?
+          AND status = 'complete'
+        ORDER BY id DESC
+        """,
+        (snapshot_id, prompt_sha256, input_sha256),
+    ).fetchall()
+    for row in rows:
+        if _annotation_context_matches(row["provider_config_json"], required_context):
+            return int(row["id"])
+    return None
+
+
 def incomplete_annotation_run_id(
     conn: sqlite3.Connection,
     *,
     snapshot_id: int,
-    requested_model: str,
+    requested_model: str | None,
     prompt_sha256: str,
     input_sha256: str,
     videos: list[Any],
     batch_size: int,
     required_context: dict[str, Any] | None = None,
 ) -> int | None:
-    """Return the newest compatible incomplete run whose stored batches still match.
+    """Return the most-progressed compatible incomplete run.
 
-    Resume identity intentionally ignores execution-only provider settings such as
-    streaming and max_tokens. Semantic identity is the requested model, prompt/taxonomy,
-    snapshot and complete input evidence hash.
+    Passing requested_model=None makes normal semantic annotation resume independent
+    of provider/model. Callers such as content-filter retry can still require an exact
+    requested model by passing one explicitly.
     """
 
     candidates = conn.execute(
         """
-        SELECT id, provider_config_json
-        FROM llm_annotation_runs
-        WHERE snapshot_id = ?
-          AND requested_model = ?
-          AND prompt_sha256 = ?
-          AND input_sha256 = ?
-          AND status = 'error'
-        ORDER BY id DESC
+        SELECT r.id, r.provider_config_json, COUNT(b.id) AS checkpoint_count
+        FROM llm_annotation_runs AS r
+        LEFT JOIN llm_annotation_batches AS b ON b.run_id = r.id
+        WHERE r.snapshot_id = ?
+          AND (? IS NULL OR r.requested_model = ?)
+          AND r.prompt_sha256 = ?
+          AND r.input_sha256 = ?
+          AND r.status = 'error'
+        GROUP BY r.id
+        ORDER BY checkpoint_count DESC, r.id DESC
         """,
-        (snapshot_id, requested_model, prompt_sha256, input_sha256),
+        (
+            snapshot_id,
+            requested_model,
+            requested_model,
+            prompt_sha256,
+            input_sha256,
+        ),
     ).fetchall()
     batches = [
         videos[index : index + batch_size]
@@ -302,6 +342,7 @@ def store_annotation_batch(
     batch_index: int,
     videos: list[Any],
     result: AnnotationBatchResult,
+    provider: ProviderConfig | None = None,
 ) -> None:
     if len(result.annotations) != len(videos):
         raise ValueError("cannot checkpoint annotation batch: annotation/video count mismatch")
@@ -314,6 +355,34 @@ def store_annotation_batch(
     expected_input_sha = evidence_hash(videos)
     if result.input_sha256 != expected_input_sha:
         raise ValueError("cannot checkpoint annotation batch: input hash mismatch")
+
+    if provider is None:
+        run_provider = conn.execute(
+            """
+            SELECT provider_name, provider_preset, requested_model,
+                   provider_sha256, provider_config_json
+            FROM llm_annotation_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run_provider is None:
+            raise ValueError(f"LLM annotation run {run_id} does not exist")
+        batch_provider_name = str(run_provider["provider_name"])
+        batch_provider_preset = str(run_provider["provider_preset"])
+        batch_requested_model = str(run_provider["requested_model"])
+        batch_provider_sha = str(run_provider["provider_sha256"])
+        batch_provider_config_json = str(run_provider["provider_config_json"])
+    else:
+        batch_provider_name = provider.name
+        batch_provider_preset = provider.preset
+        batch_requested_model = provider.model
+        batch_provider_sha = provider_fingerprint(provider)
+        batch_provider_config_json = json.dumps(
+            _provider_config_payload(provider, None),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     with conn:
         existing = conn.execute(
@@ -331,14 +400,21 @@ def store_annotation_batch(
             """
             INSERT INTO llm_annotation_batches (
                 run_id, batch_index, input_sha256, response_model,
+                provider_name, provider_preset, requested_model,
+                provider_sha256, provider_config_json,
                 usage_json, raw_response_json, validated_json
-            ) VALUES (?, ?, ?, ?, ?, '{}', ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
             """,
             (
                 run_id,
                 batch_index,
                 result.input_sha256,
                 result.response_model,
+                batch_provider_name,
+                batch_provider_preset,
+                batch_requested_model,
+                batch_provider_sha,
+                batch_provider_config_json,
                 json.dumps(result.usage, ensure_ascii=False, sort_keys=True),
                 _validated_batch_json(result.annotations),
             ),
@@ -482,7 +558,9 @@ def annotation_run_payload(conn: sqlite3.Connection, run_id: int) -> dict[str, A
 
     batches = conn.execute(
         """
-        SELECT id, batch_index, input_sha256, response_model, usage_json
+        SELECT id, batch_index, input_sha256, response_model,
+               provider_name, provider_preset, requested_model,
+               provider_sha256, provider_config_json, usage_json
         FROM llm_annotation_batches
         WHERE run_id = ?
         ORDER BY batch_index
@@ -529,6 +607,11 @@ def annotation_run_payload(conn: sqlite3.Connection, run_id: int) -> dict[str, A
                 "batch_index": int(row["batch_index"]),
                 "input_sha256": row["input_sha256"],
                 "response_model": row["response_model"],
+                "provider": row["provider_name"],
+                "provider_preset": row["provider_preset"],
+                "requested_model": row["requested_model"],
+                "provider_sha256": row["provider_sha256"],
+                "provider_config": json.loads(row["provider_config_json"]),
                 "usage": json.loads(row["usage_json"]),
             }
             for row in batches
