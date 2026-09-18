@@ -440,9 +440,29 @@ function sorted(visible) {{
     return a.position-b.position;
   }});
 }}
+function semanticHtml(annotation) {{
+  if(!annotation) return '<div class="small">no semantic annotation</div>';
+  const category='<button type="button" class="facet-chip category-chip '+(selectedCategories.has(annotation.primary_category)?'active':'')+'" data-category="'+esc(annotation.primary_category)+'">'+esc(annotation.primary_category)+'</button>';
+  const tags=(annotation.tags||[]).map(tag=>'<button type="button" class="facet-chip tag-chip '+(selectedTags.has(tag)?'active':'')+'" data-tag="'+esc(tag)+'">#'+esc(tag)+'</button>').join('');
+  return '<div class="semantic-category">'+category+' · '+Math.round((annotation.confidence??0)*100)+'%</div>'
+    +'<div class="semantic-subject">'+esc(annotation.subject)+'</div>'
+    +'<div class="semantic-tags">'+tags+'</div>'
+    +'<div class="small">'+esc(annotation.content_type)+' · annotation run '+annotation.run_id+'</div>';
+}}
+function suggestionHtml(llm) {{
+  if(!llm) return '<div class="small">no stored LLM suggestion</div>';
+  const destination=llm.existing_playlist?' → '+esc(llm.existing_playlist):llm.new_queue_proposal?' → '+esc(llm.new_queue_proposal):'';
+  return '<div class="action">LLM suggestion: '+esc(llm.action)+' · '+Math.round((llm.confidence??0)*100)+'%</div>'
+    +'<div>'+esc(llm.topic)+' · '+esc(llm.content_type)+' · '+esc(llm.timeliness)+'</div>'
+    +'<div class="reason">'+esc(llm.reason)+'</div>'
+    +'<div class="small">classification run '+llm.run_id+destination
+    +(llm.needs_description?' · needs description':'')
+    +(llm.needs_transcript?' · needs transcript':'')+'</div>';
+}}
 function rowHtml(r) {{
   const current=r.current_decision;
   const llm=r.llm;
+  const annotation=r.annotation;
   const s=state.get(r.video_id) || {{action:'',note:''}};
   const thumb=r.thumbnail?`<a href="${{esc(r.url)}}" target="_blank"><img class="thumb" loading="lazy" referrerpolicy="no-referrer" src="${{esc(r.thumbnail)}}"></a>`:'';
   const recovered=r.recovered_title?`<div><b>Recovered:</b> ${{esc(r.recovered_title)}} <span class="small">(${{esc(r.metadata_source)}})</span></div>`:'';
@@ -450,10 +470,11 @@ function rowHtml(r) {{
   const recoveredVideo=recoveredVideos?`<div><b>Recovered video:</b> ${{recoveredVideos}}</div>`:'';
   const dearrow=r.dearrow_title?`<div><b>DeArrow:</b> ${{esc(r.dearrow_title)}}</div>`:'';
   const cur=current?`<div class="action">${{esc(current.action)}}${{current.destination_playlist?' → '+esc(current.destination_playlist):''}}</div><div class="small">${{esc(current.source)}}${{current.reason?' — '+esc(current.reason):''}}</div>`:'<span class="small">unresolved</span>';
-  const lm=llm?`<div class="action">${{esc(llm.action)}} · ${{Math.round((llm.confidence??0)*100)}}%</div><div>${{esc(llm.topic)}} · ${{esc(llm.content_type)}} · ${{esc(llm.timeliness)}}</div><div class="reason">${{esc(llm.reason)}}</div><div class="small">run ${{llm.run_id}}${{llm.existing_playlist?' → '+esc(llm.existing_playlist):llm.new_queue_proposal?' → '+esc(llm.new_queue_proposal):''}}${{llm.needs_description?' · needs description':''}}${{llm.needs_transcript?' · needs transcript':''}}</div>`:'<span class="small">no stored LLM suggestion</span>';
+  const lm=semanticHtml(annotation)+suggestionHtml(llm);
   return `<tr data-id="${{esc(r.video_id)}}"><td>${{r.position}}</td><td>${{thumb}}<div><a href="${{esc(r.url)}}" target="_blank">${{esc(r.video_id)}}</a></div></td><td class="title"><b>${{esc(r.original_title)}}</b>${{recovered}}${{recoveredVideo}}${{dearrow}}<div>${{esc(r.channel||'-')}}</div><div class="small">${{dur(r.duration)}} · ${{num(r.views)}} views · ${{esc(r.upload_date||'-')}} · ${{esc(r.availability||'-')}}</div></td><td>${{cur}}</td><td>${{lm}}</td><td><select class="override-action"><option value="">no override</option>${{['keep','review','archive','delete'].map(a=>`<option value="${{a}}" ${{s.action===a?'selected':''}}>${{a}}</option>`).join('')}}</select><br><input class="override-note" placeholder="optional note" value="${{esc(s.note)}}"></td></tr>`;
 }}
 function render() {{
+  renderFacets();
   const visible=sorted(DATA.rows.filter(matches));
   const pageSize=Number(pageSizeEl.value);
   const pageCount=Math.max(1,Math.ceil(visible.length/pageSize));
@@ -461,6 +482,7 @@ function render() {{
   const start=(currentPage-1)*pageSize;
   const pageRows=visible.slice(start,start+pageSize);
   rowsEl.innerHTML=pageRows.map(rowHtml).join('');
+  bindFacetButtons(rowsEl);
   rowsEl.querySelectorAll('tr').forEach(tr=>{{
     const id=tr.dataset.id;
     tr.querySelector('.override-action').addEventListener('change',e=>{{
@@ -496,6 +518,12 @@ function exportOverrides() {{
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }}
 [searchEl,currentFilterEl,llmFilterEl,topicFilterEl,confidenceEl,sortEl,pageSizeEl].forEach(el=>el.addEventListener('input',()=>{{currentPage=1; render();}}));
+clearSemanticFiltersEl.addEventListener('click',()=>{{
+  selectedCategories.clear();
+  selectedTags.clear();
+  currentPage=1;
+  render();
+}});
 firstPageEl.addEventListener('click',()=>{{currentPage=1; render();}});
 previousPageEl.addEventListener('click',()=>{{currentPage-=1; render();}});
 nextPageEl.addEventListener('click',()=>{{currentPage+=1; render();}});
