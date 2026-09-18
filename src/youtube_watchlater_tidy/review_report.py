@@ -79,6 +79,7 @@ def review_rows(
                lc.needs_description AS llm_needs_description,
                lc.needs_transcript AS llm_needs_transcript,
                la.run_id AS annotation_run_id,
+               lar.status AS annotation_run_status,
                la.primary_category AS annotation_primary_category,
                la.subject AS annotation_subject,
                la.tags_json AS annotation_tags_json,
@@ -115,10 +116,12 @@ def review_rows(
               JOIN llm_annotation_runs AS ar2 ON ar2.id = a2.run_id
               WHERE a2.video_id = e.video_id
                 AND ar2.snapshot_id = e.snapshot_id
-                AND ar2.status = 'complete'
-              ORDER BY a2.id DESC
+              ORDER BY
+                CASE WHEN ar2.status = 'complete' THEN 1 ELSE 0 END DESC,
+                a2.id DESC
               LIMIT 1
           )
+        LEFT JOIN llm_annotation_runs AS lar ON lar.id = la.run_id
         WHERE e.snapshot_id = ?
         ORDER BY e.position
         """,
@@ -233,6 +236,7 @@ def review_rows(
                 annotation_tags = []
             annotation = {
                 "run_id": int(row["annotation_run_id"]),
+                "run_status": row["annotation_run_status"],
                 "primary_category": row["annotation_primary_category"],
                 "subject": row["annotation_subject"],
                 "tags": [str(tag) for tag in annotation_tags if isinstance(tag, str)],
