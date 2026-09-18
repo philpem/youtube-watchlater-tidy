@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .browser_session import DEFAULT_CDP_ENDPOINT
 from .db import open_catalogue
 from .multi_destination_support import create_removal_plan
 from .watchlater_browser import (
@@ -37,9 +38,11 @@ def _parser() -> argparse.ArgumentParser:
     show.add_argument("--run-id", type=int)
     show.add_argument("--snapshot", type=int)
 
-    login = sub.add_parser("login", help="open the dedicated Playwright profile for manual YouTube login")
-    login.add_argument("--user-data-dir", type=Path, default=DEFAULT_BROWSER_PROFILE)
-    login.add_argument("--channel")
+    login = sub.add_parser(
+        "login",
+        help="attach to an already-running Chromium browser for manual YouTube login",
+    )
+    login.add_argument("--cdp-endpoint", default=DEFAULT_CDP_ENDPOINT)
 
     execute = sub.add_parser("execute", help="inspect or apply a persisted removal plan")
     execute.add_argument("--run-id", type=int)
@@ -55,6 +58,10 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("--retries", type=int, default=1)
     execute.add_argument("--backoff", type=float, default=2.0)
     execute.add_argument("--user-data-dir", type=Path, default=DEFAULT_BROWSER_PROFILE)
+    execute.add_argument(
+        "--cdp-endpoint",
+        help="attach to a manually launched/authenticated Chromium browser instead of launching Playwright's profile",
+    )
     execute.add_argument("--headless", action="store_true")
     execute.add_argument("--channel")
     execute.add_argument("--action-menu-label", default="Action menu")
@@ -97,7 +104,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_login(args: argparse.Namespace) -> int:
-    open_login_session(user_data_dir=args.user_data_dir, channel=args.channel)
+    open_login_session(cdp_endpoint=args.cdp_endpoint)
     return 0
 
 
@@ -122,6 +129,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                     user_data_dir=args.user_data_dir,
                     headless=args.headless,
                     channel=args.channel,
+                    cdp_endpoint=args.cdp_endpoint,
                     action_menu_label=args.action_menu_label,
                     remove_label=args.remove_label,
                     max_scrolls=args.max_scrolls,
