@@ -2,30 +2,40 @@
 
 The browser backend is the quota-free execution path for large destination-playlist moves. It consumes the same persisted `playlist_sync_*` plans/checkpoints as the YouTube Data API backend, so classification/planning state does not depend on the UI mechanism.
 
-## Install and sign in
+## Install and attach to a signed-in browser
 
-Install the optional Playwright support and Chromium:
+Install the optional Playwright support:
 
 ```bash
 pip install -e '.[browser]'
-playwright install chromium
 ```
 
-Use the same dedicated browser profile as selective Watch Later removal:
+Google may refuse sign-in from a browser process launched under automation. The recommended flow therefore keeps **authentication outside Playwright**:
+
+1. launch Chrome/Chromium yourself with a dedicated profile and a local DevTools endpoint;
+2. sign in to YouTube manually in that normal browser window;
+3. attach the executor to that already-authenticated browser with `--cdp-endpoint`.
+
+For example on Linux:
 
 ```bash
-watchlater-playlist browser-login
+google-chrome \
+    --remote-debugging-port=9222 \
+    --user-data-dir="$HOME/.local/share/watchlater-chrome"
 ```
 
-The default profile is:
+(`chromium` can be used instead of `google-chrome` where appropriate.) Do not use your ordinary live browser profile for remote debugging; keep a separate profile for this tool.
 
-```text
-.watchlater-playwright-profile/
+After signing in manually, you can verify the connection and open Watch Later:
+
+```bash
+watchlater-playlist browser-login \
+    --cdp-endpoint http://127.0.0.1:9222
 ```
 
-It is ignored by Git. Sign in manually in the opened browser, then return to the terminal and press Enter.
+That command **attaches to the browser you already launched**; it does not launch a browser for Google login.
 
-Do not point this at your normal interactive Chrome/Chromium profile; use the dedicated automation profile.
+The older persistent-profile mode is still available when `--cdp-endpoint` is omitted, mainly for profiles that are already authenticated. New sign-ins should use the attached-browser flow above rather than attempting authentication in a Playwright-launched browser.
 
 ## Plan browser-backed moves
 
@@ -53,10 +63,11 @@ Start with a small write cap:
 
 ```bash
 watchlater-playlist execute --run-id PLAN_ID \
-    --apply --max-writes 3
+    --apply --max-writes 3 \
+    --cdp-endpoint http://127.0.0.1:9222
 ```
 
-Headed mode is the default so UI actions remain visible. `--headless` is available only after validating your setup.
+With `--cdp-endpoint`, visibility/headless state is controlled by the browser you launched. In legacy Playwright-profile mode, headed mode remains the default and `--headless` is available only after validating your setup.
 
 The executor also accepts pacing/retry controls:
 
