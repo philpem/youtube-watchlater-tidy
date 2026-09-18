@@ -34,6 +34,7 @@ from youtube_watchlater_tidy.llm_annotation_store import (
 from youtube_watchlater_tidy.llm_classification import (
     ClassificationEvidence,
     classification_evidence,
+    evidence_hash,
 )
 from youtube_watchlater_tidy.llm_config import ProviderConfig, load_project_config
 from youtube_watchlater_tidy.llm_provider import ChatResponse
