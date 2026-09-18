@@ -16,15 +16,22 @@ markdown_extensions:
 
 nav:
   - User guide: index.md
-  - Review and decisions:
-      - Manual HTML review: review.md
+  - Getting started:
+      - Installation and updates: install.md
+      - Command-line map: cli-reference.md
+  - Metadata and evidence:
+      - Archive recovery: archive-recovery.md
       - DeArrow enrichment: dearrow.md
       - Rich metadata: rich-metadata.md
       - Captions and transcripts: transcripts.md
+  - Review and decisions:
+      - Manual HTML review: review.md
   - LLM:
       - Provider configuration: llm.md
       - Classification and history: llm-classification.md
   - Apply changes to YouTube:
       - Playlist synchronization: playlist-sync.md
+      - YouTube Data API backend: youtube-api.md
       - Browser playlist backend: playlist-browser.md
       - Watch Later removal: watchlater-removal.md
+  - Troubleshooting: troubleshooting.md

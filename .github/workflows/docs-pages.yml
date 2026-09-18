@@ -1,6 +1,13 @@
 name: Publish documentation
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "pyproject.toml"
+      - ".github/workflows/docs-pages.yml"
   workflow_dispatch:
 
 permissions:

@@ -47,6 +47,10 @@ watchlater-playlist plan --backend browser
 watchlater-playlist show
 ```
 
+The plan command persists the plan in SQLite and prints JSON containing its top-level
+`run_id`. If it prints `"run_id": 7`, then `PLAN_ID` in the examples below means `7`.
+The optional `--output` filename is not the plan ID.
+
 Browser plans use the same current `move` decisions and exact decision-event IDs as API plans, but their API quota estimate is zero.
 
 ## Dry-run first

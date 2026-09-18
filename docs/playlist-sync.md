@@ -71,6 +71,19 @@ watchlater-playlist plan --backend browser
 watchlater-playlist show
 ```
 
+Planning persists a row in the catalogue and prints JSON containing a top-level `run_id`.
+That integer is the plan ID used by `show --run-id` and `execute --run-id`. For example,
+`"run_id": 7` means:
+
+```bash
+watchlater-playlist show --run-id 7
+watchlater-playlist execute --run-id 7
+```
+
+An optional `--output plan.json` is only an inspectable copy. Omitting `--run-id` selects
+the latest plan for the selected/latest snapshot, but an explicit ID is safer when several
+plans exist.
+
 For every destination:
 
 - exactly one inventory title match -> stable existing playlist ID;
@@ -112,6 +125,9 @@ watchlater-playlist execute --run-id PLAN_ID
 No OAuth client or Playwright browser is created unless `--apply` is present.
 
 ## API execution
+
+Before the first API run, create a Google Desktop OAuth client and authorize the tool as
+described in [YouTube Data API playlist workflow](youtube-api.md).
 
 ```bash
 pip install -e '.[youtube-api]'
