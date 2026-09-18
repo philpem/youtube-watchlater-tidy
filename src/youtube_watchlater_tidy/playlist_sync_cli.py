@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .browser_session import DEFAULT_CDP_ENDPOINT
 from .db import open_catalogue
 from .multi_destination import create_plan, record_selection_move
 from .multi_destination_support import plan_payload
@@ -48,6 +49,10 @@ def _add_oauth_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_browser_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--user-data-dir", type=Path, default=DEFAULT_BROWSER_PROFILE)
+    parser.add_argument(
+        "--cdp-endpoint",
+        help="attach to a manually launched/authenticated Chromium browser instead of launching Playwright's profile",
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--channel")
     parser.add_argument("--save-label", default="Save")
@@ -81,10 +86,9 @@ def _parser() -> argparse.ArgumentParser:
 
     login = sub.add_parser(
         "browser-login",
-        help="open the dedicated Playwright profile for manual YouTube sign-in",
+        help="attach to an already-running Chromium browser for manual YouTube sign-in",
     )
-    login.add_argument("--user-data-dir", type=Path, default=DEFAULT_BROWSER_PROFILE)
-    login.add_argument("--channel")
+    login.add_argument("--cdp-endpoint", default=DEFAULT_CDP_ENDPOINT)
 
     assign = sub.add_parser(
         "assign",
@@ -260,6 +264,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                         user_data_dir=args.user_data_dir,
                         headless=args.headless,
                         channel=args.channel,
+                        cdp_endpoint=args.cdp_endpoint,
                         save_label=args.save_label,
                         create_playlist_label=args.new_playlist_label,
                         create_label=args.create_label,
@@ -329,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inventory":
             return _cmd_inventory(args)
         if args.command == "browser-login":
-            open_login_session(user_data_dir=args.user_data_dir, channel=args.channel)
+            open_login_session(cdp_endpoint=args.cdp_endpoint)
             return 0
         if args.command == "assign":
             return _cmd_assign(args)
