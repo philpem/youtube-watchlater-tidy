@@ -481,7 +481,10 @@ def classify(
                 completed=0,
                 total=len(videos),
                 unit="video",
-                detail=f"{len(batches)} batch(es)",
+                detail=(
+                    f"{len(batches)} batch(es); batch_size={batch_size}; "
+                    f"concurrency={provider.concurrency}"
+                ),
             )
         )
 
@@ -501,6 +504,22 @@ def classify(
             ): index
             for index, batch in enumerate(batches)
         }
+        if progress is not None:
+            in_flight = min(provider.concurrency, len(batches))
+            queued = max(0, len(batches) - in_flight)
+            progress(
+                ProgressEvent(
+                    phase=phase,
+                    kind="status",
+                    completed=0,
+                    total=len(videos),
+                    unit="video",
+                    detail=(
+                        f"{in_flight} request(s) in flight; {queued} queued; "
+                        "waiting for first completion"
+                    ),
+                )
+            )
         for future in as_completed(futures):
             index = futures[future]
             result = future.result()
@@ -508,6 +527,9 @@ def classify(
             completed_videos += len(result.suggestions)
             completed_batches += 1
             if progress is not None:
+                remaining_batches = len(batches) - completed_batches
+                in_flight = min(provider.concurrency, remaining_batches)
+                queued = max(0, remaining_batches - in_flight)
                 progress(
                     ProgressEvent(
                         phase=phase,
@@ -515,7 +537,10 @@ def classify(
                         completed=completed_videos,
                         total=len(videos),
                         unit="video",
-                        detail=f"batch {completed_batches}/{len(batches)}",
+                        detail=(
+                            f"{completed_batches}/{len(batches)} batches complete; "
+                            f"{in_flight} in flight; {queued} queued"
+                        ),
                     )
                 )
 

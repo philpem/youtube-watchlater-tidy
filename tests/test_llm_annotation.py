@@ -262,6 +262,10 @@ Telecoms = "Telephony, radio, networking and modems."
         )
         self.assertEqual(len(result.batches), 2)
         self.assertEqual(events[0].kind, "start")
+        self.assertIn("concurrency=2", events[0].detail or "")
+        status = next(event for event in events if event.kind == "status")
+        self.assertIn("2 request(s) in flight", status.detail or "")
+        self.assertIn("0 queued", status.detail or "")
         self.assertEqual(events[-1].kind, "finish")
         self.assertEqual(
             [event.completed for event in events if event.kind == "update"],

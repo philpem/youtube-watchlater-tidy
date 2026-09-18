@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import time
 import unittest
 
 from youtube_watchlater_tidy.progress import (
@@ -10,6 +11,11 @@ from youtube_watchlater_tidy.progress import (
     legacy_message_callback,
     selected_progress_mode,
 )
+
+
+class TtyStringIO(io.StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 class ProgressTests(unittest.TestCase):
@@ -61,6 +67,32 @@ class ProgressTests(unittest.TestCase):
         self.assertIn("LLM classification: 10/20 video batch 1/2", text)
         self.assertIn("LLM classification: 20/20 video complete", text)
         self.assertNotIn("\r", text)
+
+    def test_interactive_bar_heartbeats_while_idle(self) -> None:
+        stream = TtyStringIO()
+        progress = ConsoleProgress(
+            "auto",
+            stream=stream,
+            heartbeat_interval=0.01,
+        )
+        progress(
+            ProgressEvent(
+                "LLM annotation",
+                kind="start",
+                completed=0,
+                total=100,
+                unit="video",
+                detail="10 batches; concurrency=2",
+            )
+        )
+        initial_length = len(stream.getvalue())
+        time.sleep(0.04)
+        self.assertGreater(len(stream.getvalue()), initial_length)
+
+        progress.close()
+        closed_length = len(stream.getvalue())
+        time.sleep(0.03)
+        self.assertEqual(len(stream.getvalue()), closed_length)
 
     def test_retry_is_always_visible_when_redirected(self) -> None:
         stream = io.StringIO()

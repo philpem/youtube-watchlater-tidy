@@ -78,10 +78,12 @@ class ConsoleProgress:
         *,
         stream: TextIO = sys.stderr,
         clock: Callable[[], float] = time.monotonic,
+        heartbeat_interval: float = 1.0,
     ):
         self.mode = mode
         self.stream = stream
         self.clock = clock
+        self.heartbeat_interval = heartbeat_interval
         self.enabled = mode != "never"
         self.interactive = progress_enabled(mode, stream)
         self._lock = threading.RLock()
@@ -90,6 +92,8 @@ class ConsoleProgress:
         self._completed = 0
         self._last_plain_at = 0.0
         self._last_plain_bucket: tuple[str, int] | None = None
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
 
     def __enter__(self) -> "ConsoleProgress":
         return self
@@ -98,10 +102,38 @@ class ConsoleProgress:
         self.close()
 
     def close(self) -> None:
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self.heartbeat_interval * 2))
+        self._heartbeat_thread = None
         with self._lock:
             if self._bar is not None:
                 self._bar.close()
                 self._bar = None
+
+    def _ensure_heartbeat(self) -> None:
+        if (
+            not self.interactive
+            or self.heartbeat_interval <= 0
+            or self._heartbeat_thread is not None
+        ):
+            return
+
+        self._heartbeat_stop.clear()
+
+        def run() -> None:
+            while not self._heartbeat_stop.wait(self.heartbeat_interval):
+                with self._lock:
+                    if self._bar is not None:
+                        self._bar.refresh()
+
+        self._heartbeat_thread = threading.Thread(
+            target=run,
+            name="watchlater-progress-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
 
     def _close_bar(self) -> None:
         if self._bar is not None:
@@ -180,6 +212,7 @@ class ConsoleProgress:
                     dynamic_ncols=True,
                     file=self.stream,
                 )
+                self._ensure_heartbeat()
             elif event.phase != self._phase and event.total is not None:
                 self._close_bar()
                 self._phase = event.phase
@@ -191,6 +224,7 @@ class ConsoleProgress:
                     dynamic_ncols=True,
                     file=self.stream,
                 )
+                self._ensure_heartbeat()
 
             if self._bar is not None:
                 if event.completed is not None:
