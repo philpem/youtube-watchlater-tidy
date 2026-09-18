@@ -277,7 +277,7 @@ def _cmd_providers(args: argparse.Namespace) -> int:
         print(
             f"{name}{default}: preset={provider.preset} model={provider.model} "
             f"base_url={provider.base_url} structured={provider.structured_mode} "
-            f"api_key_env={key} concurrency={provider.concurrency}"
+            f"api_key_env={key} concurrency={provider.concurrency} stream={provider.stream}"
         )
     return 0
 

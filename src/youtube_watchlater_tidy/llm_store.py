@@ -39,6 +39,7 @@ def provider_fingerprint(provider: ProviderConfig) -> str:
             "model": provider.model,
             "temperature": provider.temperature,
             "max_tokens": provider.max_tokens,
+            "stream": provider.stream,
             "structured_mode": provider.structured_mode,
             "extra": provider.extra,
         }
@@ -147,6 +148,7 @@ def store_run(
         "model": provider.model,
         "temperature": provider.temperature,
         "max_tokens": provider.max_tokens,
+        "stream": provider.stream,
         "structured_mode": provider.structured_mode,
         "extra": provider.extra,
         "classification_context": context or {},

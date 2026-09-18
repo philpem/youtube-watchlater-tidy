@@ -191,6 +191,16 @@ substitute for application validation. Because OpenRouter forwards to many model
 combinations, `json_object` is the conservative default there unless the selected model is
 known to support JSON Schema reliably.
 
+OpenRouter provider profiles default to `stream = true`. Structured JSON is accumulated
+from the SSE stream and validated only after the completion finishes, but progress can show
+that the provider has started responding and diagnostic logs record response-header time,
+time to first stream activity, total time, routed response model and `X-Generation-Id`.
+Set `stream = false` in a provider profile to restore buffered/non-streaming behavior.
+
+The project default output ceiling is `max_tokens = 6000`. An explicit provider setting
+continues to override that default; very large values such as 32768 increase the worst-case
+runtime of a routed reasoning model even though they do not reserve that many tokens.
+
 ## Interest briefs and prompt provenance
 
 The user's interest brief is a plain Markdown/text file and contains only preferences.

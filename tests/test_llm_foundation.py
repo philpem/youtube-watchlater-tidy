@@ -30,6 +30,29 @@ class _FakeResponse:
         return self.payload
 
 
+class _FakeStreamResponse:
+    def __init__(self, lines: list[dict | str], headers: dict[str, str] | None = None) -> None:
+        self.lines = lines
+        self.headers = headers or {}
+        self.status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def __iter__(self):
+        for item in self.lines:
+            if isinstance(item, str):
+                if item == "[DONE]":
+                    yield b"data: [DONE]\n\n"
+                else:
+                    yield item.encode("utf-8")
+            else:
+                yield ("data: " + json.dumps(item) + "\n\n").encode("utf-8")
+
+
 class LLMFoundationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -102,10 +125,12 @@ guidance = "Prefer review when evidence is weak."
         provider = config.provider("router")
         self.assertEqual(provider.base_url, "https://openrouter.ai/api/v1")
         self.assertEqual(provider.api_key_env, "OPENROUTER_API_KEY")
-        url, headers, _ = build_chat_request(
+        self.assertTrue(provider.stream)
+        url, headers, payload = build_chat_request(
             provider,
             [{"role": "user", "content": "hello"}],
         )
+        self.assertTrue(json.loads(payload)["stream"])
         self.assertEqual(url, "https://openrouter.ai/api/v1/chat/completions")
         self.assertEqual(headers["Authorization"], "Bearer sk-or-test")
         self.assertEqual(headers["HTTP-Referer"], "https://example.invalid/project")
@@ -277,6 +302,108 @@ guidance = "Prefer review when evidence is weak."
         self.assertEqual([record["event"] for record in records], ["request", "response"])
         self.assertIn('"content": null', records[1]["raw_body"])
         self.assertIn("parse_error", records[1])
+
+    def test_streaming_chat_reconstructs_content_and_usage(self) -> None:
+        provider = ProviderConfig(
+            name="openrouter",
+            preset="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="openrouter/free",
+            retries=0,
+            stream=True,
+        )
+        events = []
+
+        def opener(request, timeout):
+            body = json.loads(request.data)
+            self.assertTrue(body["stream"])
+            return _FakeStreamResponse(
+                [
+                    {
+                        "id": "gen-test",
+                        "model": "google/gemma-test:free",
+                        "choices": [
+                            {
+                                "delta": {"content": '{"annotations":['},
+                                "finish_reason": None,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "gen-test",
+                        "model": "google/gemma-test:free",
+                        "choices": [
+                            {
+                                "delta": {"content": "]}" },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+                    },
+                    "[DONE]",
+                ],
+                headers={"X-Generation-Id": "gen-test"},
+            )
+
+        response = chat(
+            provider,
+            [{"role": "user", "content": "probe"}],
+            opener=opener,
+            progress=events.append,
+        )
+        self.assertEqual(response.content, '{"annotations":[]}')
+        self.assertEqual(response.model, "google/gemma-test:free")
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertEqual(response.usage["completion_tokens"], 5)
+        self.assertTrue(any("responding" in (event.detail or "") for event in events))
+
+    def test_streaming_diagnostics_record_latency_and_generation_id(self) -> None:
+        provider = ProviderConfig(
+            name="openrouter",
+            preset="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="openrouter/free",
+            retries=0,
+            stream=True,
+        )
+        log_path = self.root / "stream.jsonl"
+
+        def opener(request, timeout):
+            return _FakeStreamResponse(
+                [
+                    {
+                        "model": "test/free",
+                        "choices": [
+                            {
+                                "delta": {"content": '{"ok":true}'},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 3},
+                    },
+                    "[DONE]",
+                ],
+                headers={"X-Generation-Id": "gen-123"},
+            )
+
+        with use_diagnostic_log(log_path):
+            response = chat(
+                provider,
+                [{"role": "user", "content": "probe"}],
+                opener=opener,
+            )
+
+        self.assertEqual(parse_json_content(response, provider.name), {"ok": True})
+        records = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(records[-1]["generation_id"], "gen-123")
+        self.assertTrue(records[-1]["stream"])
+        self.assertGreaterEqual(records[-1]["headers_received_seconds"], 0)
+        self.assertGreaterEqual(records[-1]["first_activity_seconds"], 0)
+        self.assertGreaterEqual(records[-1]["total_seconds"], 0)
+        self.assertEqual(records[-1]["content_chars"], len('{"ok":true}'))
 
     def test_chat_accepts_typed_text_content_parts(self) -> None:
         provider = ProviderConfig(
