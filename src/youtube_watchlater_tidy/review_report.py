@@ -247,6 +247,8 @@ def render_review_html(snapshot_id: int, rows: list[dict[str, Any]]) -> str:
 body {{ margin: 1rem; }}
 header {{ position: sticky; top: 0; background: Canvas; padding: .5rem 0; z-index: 2; }}
 .controls {{ display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }}
+.pagination {{ display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .5rem 0; }}
+.pagination button:disabled {{ opacity: .5; }}
 input, select, button {{ font: inherit; padding: .35rem; }}
 #summary {{ margin: .5rem 0; font-size: .9rem; }}
 table {{ border-collapse: collapse; width: 100%; font-size: .85rem; }}
@@ -273,6 +275,14 @@ footer {{ margin-top: 1rem; font-size: .8rem; opacity: .8; }}
 <label>Sort <select id="sort"><option value="position">position ↑</option><option value="position-desc">position ↓</option><option value="confidence">confidence ↑</option><option value="confidence-desc">confidence ↓</option><option value="views-desc">views ↓</option></select></label>
 <button id="exportButton">Export explicit overrides</button>
 </div>
+<div class="pagination">
+<label>Rows/page <select id="pageSize"><option>50</option><option selected>100</option><option>250</option><option>500</option></select></label>
+<button id="firstPage" type="button">« First</button>
+<button id="previousPage" type="button">‹ Previous</button>
+<span id="pageStatus"></span>
+<button id="nextPage" type="button">Next ›</button>
+<button id="lastPage" type="button">Last »</button>
+</div>
 <div id="summary"></div>
 </header>
 <table>
@@ -283,12 +293,19 @@ footer {{ margin-top: 1rem; font-size: .8rem; opacity: .8; }}
 <script>
 const DATA={data};
 const state = new Map();
+let currentPage = 1;
 const searchEl = document.getElementById('search');
 const currentFilterEl = document.getElementById('currentFilter');
 const llmFilterEl = document.getElementById('llmFilter');
 const topicFilterEl = document.getElementById('topicFilter');
 const confidenceEl = document.getElementById('confidence');
 const sortEl = document.getElementById('sort');
+const pageSizeEl = document.getElementById('pageSize');
+const firstPageEl = document.getElementById('firstPage');
+const previousPageEl = document.getElementById('previousPage');
+const nextPageEl = document.getElementById('nextPage');
+const lastPageEl = document.getElementById('lastPage');
+const pageStatusEl = document.getElementById('pageStatus');
 const rowsEl = document.getElementById('rows');
 const summaryEl = document.getElementById('summary');
 const exportButtonEl = document.getElementById('exportButton');
@@ -337,21 +354,31 @@ function rowHtml(r) {{
 }}
 function render() {{
   const visible=sorted(DATA.rows.filter(matches));
-  rowsEl.innerHTML=visible.map(rowHtml).join('');
+  const pageSize=Number(pageSizeEl.value);
+  const pageCount=Math.max(1,Math.ceil(visible.length/pageSize));
+  currentPage=Math.min(Math.max(1,currentPage),pageCount);
+  const start=(currentPage-1)*pageSize;
+  const pageRows=visible.slice(start,start+pageSize);
+  rowsEl.innerHTML=pageRows.map(rowHtml).join('');
   rowsEl.querySelectorAll('tr').forEach(tr=>{{
     const id=tr.dataset.id;
     tr.querySelector('.override-action').addEventListener('change',e=>{{
-      const x=state.get(id)||{{action:'',note:''}}; x.action=e.target.value; state.set(id,x); renderSummary(visible.length);
+      const x=state.get(id)||{{action:'',note:''}}; x.action=e.target.value; state.set(id,x); renderSummary(visible.length,start,pageRows.length,pageCount);
     }});
     tr.querySelector('.override-note').addEventListener('input',e=>{{
       const x=state.get(id)||{{action:'',note:''}}; x.note=e.target.value; state.set(id,x);
     }});
   }});
-  renderSummary(visible.length);
+  renderSummary(visible.length,start,pageRows.length,pageCount);
 }}
-function renderSummary(visibleCount) {{
+function renderSummary(visibleCount,start,pageCountOnPage,pageCount) {{
   const overrideCount=[...state.values()].filter(x=>x.action).length;
-  summaryEl.textContent=`Showing ${{visibleCount}} / ${{DATA.rows.length}} videos; ${{overrideCount}} explicit override(s)`;
+  const first=visibleCount===0?0:start+1;
+  const last=Math.min(start+pageCountOnPage,visibleCount);
+  summaryEl.textContent=`Showing ${{first}}–${{last}} of ${{visibleCount}} matching / ${{DATA.rows.length}} total videos; ${{overrideCount}} explicit override(s)`;
+  pageStatusEl.textContent=`Page ${{currentPage}} / ${{pageCount}}`;
+  firstPageEl.disabled=previousPageEl.disabled=currentPage<=1;
+  nextPageEl.disabled=lastPageEl.disabled=currentPage>=pageCount;
 }}
 function exportOverrides() {{
   const decisions=[];
@@ -367,7 +394,15 @@ function exportOverrides() {{
   a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }}
-[searchEl,currentFilterEl,llmFilterEl,topicFilterEl,confidenceEl,sortEl].forEach(el=>el.addEventListener('input',render));
+[searchEl,currentFilterEl,llmFilterEl,topicFilterEl,confidenceEl,sortEl,pageSizeEl].forEach(el=>el.addEventListener('input',()=>{{currentPage=1; render();}}));
+firstPageEl.addEventListener('click',()=>{{currentPage=1; render();}});
+previousPageEl.addEventListener('click',()=>{{currentPage-=1; render();}});
+nextPageEl.addEventListener('click',()=>{{currentPage+=1; render();}});
+lastPageEl.addEventListener('click',()=>{{
+  const visibleCount=DATA.rows.filter(matches).length;
+  currentPage=Math.max(1,Math.ceil(visibleCount/Number(pageSizeEl.value)));
+  render();
+}});
 exportButtonEl.addEventListener('click',exportOverrides);
 populateTopics();
 render();
