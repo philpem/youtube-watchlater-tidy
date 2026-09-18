@@ -279,6 +279,128 @@ Telecoms = "Telephony, radio, networking and modems."
             [1, 2],
         )
 
+    def test_truncated_annotation_batch_recursively_splits_and_preserves_order(self) -> None:
+        videos = [
+            ClassificationEvidence(
+                video_id=f"video00000{suffix}",
+                playlist_position=index,
+                original_title=f"Video {suffix}",
+                recovered_title=None,
+                recovered_source=None,
+                dearrow_title=None,
+                channel="Test",
+                channel_id="UCTEST",
+                duration=1,
+                view_count=1,
+                upload_date=None,
+                availability=None,
+            )
+            for index, suffix in enumerate(("A", "B", "C", "D"), start=1)
+        ]
+        calls: list[int] = []
+
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
+            batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
+            calls.append(len(batch))
+            usage = {
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 1},
+            }
+            if len(batch) > 1:
+                return ChatResponse(
+                    content="{",
+                    usage=usage,
+                    model="model-a",
+                    raw={},
+                    finish_reason="length",
+                )
+            video_id = batch[0]["video_id"]
+            return ChatResponse(
+                content=json.dumps(
+                    {
+                        "annotations": [
+                            {
+                                "video_id": video_id,
+                                "primary_category": "Retrocomputing",
+                                "subject": "subject " + video_id,
+                                "tags": ["retrocomputing"],
+                                "content_type": "technical",
+                                "confidence": 0.8,
+                            }
+                        ]
+                    }
+                ),
+                usage=usage,
+                model="model-a",
+                raw={},
+                finish_reason="stop",
+            )
+
+        events = []
+        with patch("youtube_watchlater_tidy.llm_annotation.chat", side_effect=fake_chat):
+            result = annotate(
+                self.provider,
+                self.prompt,
+                videos,
+                batch_size=4,
+                progress=events.append,
+            )
+
+        self.assertEqual(calls, [4, 2, 1, 1, 2, 1, 1])
+        self.assertEqual(
+            [item.video_id for item in result.annotations],
+            [video.video_id for video in videos],
+        )
+        self.assertEqual(len(result.batches), 1)
+        self.assertEqual(result.batches[0].usage["prompt_tokens"], 7)
+        self.assertEqual(result.batches[0].usage["completion_tokens"], 14)
+        self.assertEqual(
+            result.batches[0].usage["prompt_tokens_details"]["cached_tokens"],
+            7,
+        )
+        split_messages = [
+            event.detail or ""
+            for event in events
+            if event.kind == "message" and "output limit" in (event.detail or "")
+        ]
+        self.assertTrue(any("4 videos as 2 + 2" in message for message in split_messages))
+        self.assertTrue(any("2 videos as 1 + 1" in message for message in split_messages))
+        self.assertEqual(events[-1].kind, "finish")
+        self.assertEqual(events[-1].completed, 4)
+
+    def test_single_video_annotation_truncation_is_actionable(self) -> None:
+        video = ClassificationEvidence(
+            video_id="video00000A",
+            playlist_position=1,
+            original_title="A",
+            recovered_title=None,
+            recovered_source=None,
+            dearrow_title=None,
+            channel="One",
+            channel_id="UCONE",
+            duration=1,
+            view_count=1,
+            upload_date=None,
+            availability=None,
+        )
+
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
+            return ChatResponse(
+                content="{",
+                usage={},
+                model="model-a",
+                raw={},
+                finish_reason="length",
+            )
+
+        with patch("youtube_watchlater_tidy.llm_annotation.chat", side_effect=fake_chat):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"single-video annotation response.*increase providers\.test\.max_tokens",
+            ):
+                annotate(self.provider, self.prompt, [video], batch_size=1)
+
     def test_taxonomy_discovery_adds_reserved_categories(self) -> None:
         with open_catalogue(self.db_path) as conn:
             videos = classification_evidence(
