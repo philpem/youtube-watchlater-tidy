@@ -8,6 +8,7 @@ from pathlib import Path
 from .db import open_catalogue
 from .llm_classification import classify, evidence_hash
 from .llm_config import load_project_config
+from .llm_diagnostics import use_diagnostic_log
 from .llm_prompt import render_prompt
 from .progress import ConsoleProgress, add_progress_argument, selected_progress_mode
 from .llm_store import (
@@ -38,6 +39,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--batch-size", type=int, default=3)
+    parser.add_argument(
+        "--llm-log",
+        type=Path,
+        help="append redacted LLM request/response diagnostics as JSON Lines",
+    )
     parser.add_argument(
         "--max-transcript-chars",
         type=int,
@@ -209,7 +215,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        return _run(args)
+        if args.llm_log is not None:
+            print(
+                f"LLM diagnostics: appending redacted request/response records to {args.llm_log}",
+                file=sys.stderr,
+                flush=True,
+            )
+        with use_diagnostic_log(args.llm_log):
+            return _run(args)
     except KeyboardInterrupt:
         print("watchlater-llm-transcript: interrupted", file=sys.stderr)
         return 130
