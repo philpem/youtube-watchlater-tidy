@@ -27,6 +27,7 @@ from youtube_watchlater_tidy.llm_annotation_store import (
     begin_annotation_run,
     cached_annotation_run_id,
     complete_annotation_run,
+    coalesce_annotation_run_checkpoints,
     incomplete_annotation_run_id,
     reusable_annotation_run_id,
     store_annotation_batch,
@@ -959,6 +960,227 @@ Telecoms = "Telephony, radio, networking and modems."
             )
 
         self.assertEqual(resumed, progressed_run)
+
+    def test_coalesce_annotation_checkpoints_unions_disjoint_runs(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=3,
+            )
+            alternate = ProviderConfig(
+                name="alternate",
+                preset="generic",
+                base_url="https://alternate.invalid/v1",
+                model="model-b",
+                concurrency=1,
+            )
+            destination = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation", "batch_size": 1},
+            )
+            source = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=alternate,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation", "batch_size": 1},
+            )
+            first = AnnotationBatchResult(
+                annotations=(self._annotation(videos[0].video_id),),
+                input_sha256=evidence_hash([videos[0]]),
+                usage={"prompt_tokens": 10},
+                response_model=self.provider.model,
+            )
+            second = AnnotationBatchResult(
+                annotations=(self._annotation(videos[1].video_id, "Telecoms"),),
+                input_sha256=evidence_hash([videos[1]]),
+                usage={"prompt_tokens": 11},
+                response_model=alternate.model,
+            )
+            store_annotation_batch(
+                conn,
+                run_id=destination,
+                batch_index=0,
+                videos=[videos[0]],
+                result=first,
+                provider=self.provider,
+            )
+            store_annotation_batch(
+                conn,
+                run_id=source,
+                batch_index=1,
+                videos=[videos[1]],
+                result=second,
+                provider=alternate,
+            )
+            _provider_sha, input_sha, _cache_key = annotation_cache_key(
+                self.provider,
+                self.prompt,
+                videos,
+            )
+
+            coalesced = coalesce_annotation_run_checkpoints(
+                conn,
+                destination_run_id=destination,
+                snapshot_id=self.snapshot,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+                required_context={"stage": "semantic_annotation"},
+            )
+            payload = annotation_run_payload(conn, destination)
+            again = coalesce_annotation_run_checkpoints(
+                conn,
+                destination_run_id=destination,
+                snapshot_id=self.snapshot,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+                required_context={"stage": "semantic_annotation"},
+            )
+
+        self.assertEqual(coalesced.copied_batches, 1)
+        self.assertEqual(coalesced.copied_videos, 1)
+        self.assertEqual(coalesced.source_run_ids, (source,))
+        self.assertEqual(
+            {batch["batch_index"] for batch in payload["batches"]},
+            {0, 1},
+        )
+        self.assertEqual(payload["batches"][0]["provider"], self.provider.name)
+        self.assertEqual(payload["batches"][1]["provider"], alternate.name)
+        self.assertEqual(payload["batches"][1]["requested_model"], alternate.model)
+        self.assertEqual(again.copied_batches, 0)
+        self.assertEqual(again.copied_videos, 0)
+        self.assertEqual(again.source_run_ids, ())
+
+    def test_coalesce_skips_overlaps_bad_layouts_and_retry_runs(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=3,
+            )
+            destination = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation", "batch_size": 1},
+            )
+            first = AnnotationBatchResult(
+                annotations=(self._annotation(videos[0].video_id),),
+                input_sha256=evidence_hash([videos[0]]),
+                usage={},
+                response_model=self.provider.model,
+            )
+            store_annotation_batch(
+                conn,
+                run_id=destination,
+                batch_index=0,
+                videos=[videos[0]],
+                result=first,
+                provider=self.provider,
+            )
+
+            overlap = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation", "batch_size": 1},
+            )
+            store_annotation_batch(
+                conn,
+                run_id=overlap,
+                batch_index=0,
+                videos=[videos[0]],
+                result=first,
+                provider=self.provider,
+            )
+
+            wrong_layout = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation", "batch_size": 2},
+            )
+            misplaced = AnnotationBatchResult(
+                annotations=(self._annotation(videos[0].video_id),),
+                input_sha256=evidence_hash([videos[0]]),
+                usage={},
+                response_model=self.provider.model,
+            )
+            store_annotation_batch(
+                conn,
+                run_id=wrong_layout,
+                batch_index=1,
+                videos=[videos[0]],
+                result=misplaced,
+                provider=self.provider,
+            )
+
+            retry_run = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "content_filter_retry", "source_run_id": destination},
+            )
+            retry_annotation = AnnotationBatchResult(
+                annotations=(self._annotation(videos[1].video_id, "Telecoms"),),
+                input_sha256=evidence_hash([videos[1]]),
+                usage={},
+                response_model=self.provider.model,
+            )
+            store_annotation_batch(
+                conn,
+                run_id=retry_run,
+                batch_index=1,
+                videos=[videos[1]],
+                result=retry_annotation,
+                provider=self.provider,
+            )
+            _provider_sha, input_sha, _cache_key = annotation_cache_key(
+                self.provider,
+                self.prompt,
+                videos,
+            )
+
+            coalesced = coalesce_annotation_run_checkpoints(
+                conn,
+                destination_run_id=destination,
+                snapshot_id=self.snapshot,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+                required_context={"stage": "semantic_annotation"},
+            )
+            completed = annotation_completed_batch_indexes(conn, destination)
+
+        self.assertEqual(coalesced.copied_batches, 0)
+        self.assertEqual(completed, {0})
 
     def test_annotation_resume_skips_checkpointed_batches(self) -> None:
         videos = [

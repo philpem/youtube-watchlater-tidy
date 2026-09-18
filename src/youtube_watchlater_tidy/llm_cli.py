@@ -21,6 +21,7 @@ from .llm_annotation_store import (
     cached_annotation_run_id,
     complete_annotation_run,
     content_filtered_retry_target,
+    coalesce_annotation_run_checkpoints,
     incomplete_annotation_run_id,
     latest_annotation_run_id,
     reusable_annotation_run_id,
@@ -635,6 +636,25 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             )
             if partial is not None:
                 run_id = partial
+                coalesced = coalesce_annotation_run_checkpoints(
+                    conn,
+                    destination_run_id=run_id,
+                    snapshot_id=snapshot_id,
+                    prompt_sha256=prompt.sha256,
+                    input_sha256=input_sha,
+                    videos=videos,
+                    batch_size=args.batch_size,
+                    required_context={"stage": "semantic_annotation"},
+                )
+                if coalesced.copied_batches:
+                    source_runs = ", ".join(str(value) for value in coalesced.source_run_ids)
+                    print(
+                        f"Coalesced {coalesced.copied_batches} checkpoint batch(es) "
+                        f"covering {coalesced.copied_videos} video(s) into annotation "
+                        f"run {run_id} from run(s) {source_runs}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 completed_batch_indexes = annotation_completed_batch_indexes(conn, run_id)
                 resumed = True
                 completed_videos = sum(

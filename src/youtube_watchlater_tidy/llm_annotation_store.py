@@ -27,6 +27,14 @@ def _canonical_hash(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class AnnotationCoalesceResult:
+    destination_run_id: int
+    copied_batches: int
+    copied_videos: int
+    source_run_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class ContentFilteredRetryTarget:
     source_run_id: int
     snapshot_id: int
@@ -270,6 +278,216 @@ def annotation_completed_batch_indexes(
             (run_id,),
         )
     }
+
+
+def coalesce_annotation_run_checkpoints(
+    conn: sqlite3.Connection,
+    *,
+    destination_run_id: int,
+    snapshot_id: int,
+    prompt_sha256: str,
+    input_sha256: str,
+    videos: list[Any],
+    batch_size: int,
+    required_context: dict[str, Any] | None = None,
+) -> AnnotationCoalesceResult:
+    """Copy compatible missing checkpoints from sibling interrupted runs.
+
+    A reusable checkpoint must have the same semantic run identity and the exact
+    batch input hash for the destination's current batch layout. Batch and annotation
+    provenance are copied verbatim. Existing destination batches always win.
+    """
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
+    destination = conn.execute(
+        """
+        SELECT id, snapshot_id, prompt_sha256, input_sha256, status,
+               provider_config_json
+        FROM llm_annotation_runs
+        WHERE id = ?
+        """,
+        (destination_run_id,),
+    ).fetchone()
+    if destination is None:
+        raise ValueError(f"LLM annotation run {destination_run_id} does not exist")
+    if int(destination["snapshot_id"]) != snapshot_id:
+        raise ValueError("annotation checkpoint destination snapshot does not match")
+    if destination["prompt_sha256"] != prompt_sha256:
+        raise ValueError("annotation checkpoint destination prompt does not match")
+    if destination["input_sha256"] != input_sha256:
+        raise ValueError("annotation checkpoint destination input does not match")
+    if destination["status"] != "error":
+        raise ValueError("annotation checkpoint destination is not incomplete")
+    if not _annotation_context_matches(
+        destination["provider_config_json"], required_context
+    ):
+        raise ValueError("annotation checkpoint destination context does not match")
+
+    batches = [
+        videos[index : index + batch_size]
+        for index in range(0, len(videos), batch_size)
+    ]
+    expected_hashes = {
+        index: evidence_hash(batch)
+        for index, batch in enumerate(batches)
+    }
+    expected_video_ids = {
+        index: {video.video_id for video in batch}
+        for index, batch in enumerate(batches)
+    }
+
+    existing_indexes = annotation_completed_batch_indexes(conn, destination_run_id)
+    existing_video_ids = {
+        str(row["video_id"])
+        for row in conn.execute(
+            "SELECT video_id FROM llm_annotations WHERE run_id = ?",
+            (destination_run_id,),
+        )
+    }
+    missing_indexes = set(expected_hashes) - existing_indexes
+    if not missing_indexes:
+        return AnnotationCoalesceResult(
+            destination_run_id=destination_run_id,
+            copied_batches=0,
+            copied_videos=0,
+            source_run_ids=(),
+        )
+
+    candidates = conn.execute(
+        """
+        SELECT id, provider_config_json
+        FROM llm_annotation_runs
+        WHERE snapshot_id = ?
+          AND prompt_sha256 = ?
+          AND input_sha256 = ?
+          AND status = 'error'
+          AND id != ?
+        ORDER BY id DESC
+        """,
+        (
+            snapshot_id,
+            prompt_sha256,
+            input_sha256,
+            destination_run_id,
+        ),
+    ).fetchall()
+
+    copied_batches = 0
+    copied_videos = 0
+    source_run_ids: list[int] = []
+
+    with conn:
+        for candidate in candidates:
+            if not missing_indexes:
+                break
+            if not _annotation_context_matches(
+                candidate["provider_config_json"], required_context
+            ):
+                continue
+            source_run_id = int(candidate["id"])
+            source_contributed = False
+            source_batches = conn.execute(
+                """
+                SELECT *
+                FROM llm_annotation_batches
+                WHERE run_id = ?
+                ORDER BY batch_index
+                """,
+                (source_run_id,),
+            ).fetchall()
+            for source_batch in source_batches:
+                batch_index = int(source_batch["batch_index"])
+                if batch_index not in missing_indexes:
+                    continue
+                if source_batch["input_sha256"] != expected_hashes[batch_index]:
+                    continue
+
+                source_annotations = conn.execute(
+                    """
+                    SELECT *
+                    FROM llm_annotations
+                    WHERE batch_id = ?
+                    ORDER BY playlist_position, id
+                    """,
+                    (source_batch["id"],),
+                ).fetchall()
+                source_video_ids = {
+                    str(row["video_id"]) for row in source_annotations
+                }
+                if source_video_ids != expected_video_ids[batch_index]:
+                    continue
+                if source_video_ids & existing_video_ids:
+                    continue
+
+                batch_cursor = conn.execute(
+                    """
+                    INSERT INTO llm_annotation_batches (
+                        run_id, batch_index, input_sha256, response_model,
+                        provider_name, provider_preset, requested_model,
+                        provider_sha256, provider_config_json,
+                        usage_json, raw_response_json, validated_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        destination_run_id,
+                        batch_index,
+                        source_batch["input_sha256"],
+                        source_batch["response_model"],
+                        source_batch["provider_name"],
+                        source_batch["provider_preset"],
+                        source_batch["requested_model"],
+                        source_batch["provider_sha256"],
+                        source_batch["provider_config_json"],
+                        source_batch["usage_json"],
+                        source_batch["raw_response_json"],
+                        source_batch["validated_json"],
+                    ),
+                )
+                destination_batch_id = int(batch_cursor.lastrowid)
+
+                for annotation in source_annotations:
+                    conn.execute(
+                        """
+                        INSERT INTO llm_annotations (
+                            run_id, batch_id, video_id, playlist_position,
+                            evidence_sha256, evidence_json,
+                            primary_category, subject, tags_json,
+                            content_type, confidence, raw_result_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            destination_run_id,
+                            destination_batch_id,
+                            annotation["video_id"],
+                            annotation["playlist_position"],
+                            annotation["evidence_sha256"],
+                            annotation["evidence_json"],
+                            annotation["primary_category"],
+                            annotation["subject"],
+                            annotation["tags_json"],
+                            annotation["content_type"],
+                            annotation["confidence"],
+                            annotation["raw_result_json"],
+                        ),
+                    )
+
+                missing_indexes.remove(batch_index)
+                existing_video_ids.update(source_video_ids)
+                copied_batches += 1
+                copied_videos += len(source_annotations)
+                source_contributed = True
+
+            if source_contributed:
+                source_run_ids.append(source_run_id)
+
+    return AnnotationCoalesceResult(
+        destination_run_id=destination_run_id,
+        copied_batches=copied_batches,
+        copied_videos=copied_videos,
+        source_run_ids=tuple(source_run_ids),
+    )
 
 
 def _provider_config_payload(
