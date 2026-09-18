@@ -55,6 +55,16 @@ file = "interests.example.md"
 file = "interests.example.md"
 guidance = "When confidence is below 0.65, prefer review over delete."
 
+# Stable broad categories used by `watchlater-llm annotate --taxonomy configured`.
+# The semantic pass adds reserved Other/Unclear fallbacks automatically.
+[llm.review_categories]
+"Electronics" = "Electronics, test equipment, embedded systems and hardware engineering."
+"Retrocomputing" = "Historic computers, operating systems and unusual architectures."
+"Software" = "Programming, operating systems and software engineering."
+"Telecoms" = "Telephony, radio, networking, modems and communications."
+"Gaming" = "Games and game-related material."
+"General entertainment" = "Comedy, music, culture and miscellaneous entertainment."
+
 [playlists]
 "Queue - Electronics" = "Embedded systems, electronics, test equipment, PCB work and technically deep hardware repair."
 "Queue - Retrocomputing" = "Vintage computers, unusual architectures, restoration, emulation and computing history."
