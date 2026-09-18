@@ -6,6 +6,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable
 
+from .creator_metadata import creator_associations, primary_creator_index
+
 
 UNAVAILABLE_TITLES = {"[private video]", "[deleted video]"}
 
@@ -66,6 +68,8 @@ def _effective_rows(
                COALESCE(e.duration, m.duration) AS duration,
                COALESCE(e.view_count, m.view_count) AS view_count,
                COALESCE(e.availability, m.availability) AS availability,
+               e.raw_json AS source_raw_json,
+               m.raw_json AS metadata_raw_json,
                m.source AS metadata_source,
                d.action AS current_action,
                d.destination_playlist
@@ -95,33 +99,32 @@ def creator_rows(
     if remaining:
         rows = [row for row in rows if row["current_action"] in (None, "clear")]
 
+    names_to_keys, primary_details = primary_creator_index(rows)
     grouped: dict[str, dict[str, object]] = {}
     for row in rows:
-        key = (
-            row["channel_id"]
-            or row["uploader_id"]
-            or row["channel"]
-            or row["uploader"]
-            or "(unknown)"
-        )
-        group = grouped.setdefault(
-            str(key),
-            {
-                "channel_id": row["channel_id"],
-                "name": row["channel"] or row["uploader"] or "(unknown)",
-                "positions": [],
-                "durations": [],
-                "views": [],
-                "actions": [],
-            },
-        )
-        group["positions"].append(int(row["position"]))  # type: ignore[union-attr]
-        if row["duration"] is not None:
-            group["durations"].append(float(row["duration"]))  # type: ignore[union-attr]
-        if row["view_count"] is not None:
-            group["views"].append(int(row["view_count"]))  # type: ignore[union-attr]
-        action = row["current_action"]
-        group["actions"].append(None if action == "clear" else action)  # type: ignore[union-attr]
+        for association in creator_associations(
+            row,
+            names_to_keys=names_to_keys,
+            primary_details=primary_details,
+        ):
+            group = grouped.setdefault(
+                association.key,
+                {
+                    "channel_id": association.channel_id,
+                    "name": association.name,
+                    "positions": [],
+                    "durations": [],
+                    "views": [],
+                    "actions": [],
+                },
+            )
+            group["positions"].append(int(row["position"]))  # type: ignore[union-attr]
+            if row["duration"] is not None:
+                group["durations"].append(float(row["duration"]))  # type: ignore[union-attr]
+            if row["view_count"] is not None:
+                group["views"].append(int(row["view_count"]))  # type: ignore[union-attr]
+            action = row["current_action"]
+            group["actions"].append(None if action == "clear" else action)  # type: ignore[union-attr]
 
     result: list[CreatorRow] = []
     for key, group in grouped.items():
@@ -253,6 +256,7 @@ def _table(headers: list[str], data: list[list[str]]) -> str:
 
 def render_creators(rows: Iterable[CreatorRow], limit: int | None = None) -> str:
     rows = list(rows)
+    total = len(rows)
     if limit is not None:
         rows = rows[:limit]
 
@@ -274,7 +278,11 @@ def render_creators(rows: Iterable[CreatorRow], limit: int | None = None) -> str
         ]
         for row in rows
     ]
-    return _table(headers, data)
+    output = _table(headers, data)
+    if limit is not None and total > limit:
+        output += f"\n... {total - limit} more"
+    output += f"\n{total} creator(s)"
+    return output
 
 
 def render_videos(rows: Iterable[VideoRow], limit: int | None = None) -> str:
