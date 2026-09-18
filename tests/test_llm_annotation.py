@@ -28,6 +28,7 @@ from youtube_watchlater_tidy.llm_annotation_store import (
     cached_annotation_run_id,
     complete_annotation_run,
     incomplete_annotation_run_id,
+    reusable_annotation_run_id,
     store_annotation_batch,
     store_annotation_run,
 )
@@ -701,18 +702,30 @@ Telecoms = "Telephony, radio, networking and modems."
                 usage={"prompt_tokens": 11},
                 response_model="model-a",
             )
+            alternate_provider = ProviderConfig(
+                name="alternate",
+                preset="generic",
+                base_url="https://alternate.invalid/v1",
+                model="model-b",
+                concurrency=1,
+            )
             store_annotation_batch(
                 conn,
                 run_id=run_id,
                 batch_index=1,
                 videos=[videos[1]],
                 result=second,
+                provider=alternate_provider,
             )
             complete_annotation_run(conn, run_id)
             payload = annotation_run_payload(conn, run_id)
 
         self.assertEqual(payload["status"], "complete")
         self.assertEqual(len(payload["annotations"]), 2)
+        self.assertEqual(payload["batches"][0]["provider"], self.provider.name)
+        self.assertEqual(payload["batches"][0]["requested_model"], self.provider.model)
+        self.assertEqual(payload["batches"][1]["provider"], "alternate")
+        self.assertEqual(payload["batches"][1]["requested_model"], "model-b")
 
     def test_incomplete_resume_ignores_execution_only_provider_changes(self) -> None:
         with open_catalogue(self.db_path) as conn:
@@ -772,7 +785,7 @@ Telecoms = "Telephony, radio, networking and modems."
 
         self.assertEqual(resumed, run_id)
 
-    def test_incomplete_resume_rejects_different_model(self) -> None:
+    def test_incomplete_resume_can_ignore_different_provider_and_model(self) -> None:
         with open_catalogue(self.db_path) as conn:
             videos = classification_evidence(
                 conn,
@@ -788,6 +801,147 @@ Telecoms = "Telephony, radio, networking and modems."
                 videos=videos,
                 taxonomy_source="configured",
             )
+            changed_provider = ProviderConfig(
+                name="alternate",
+                preset="generic",
+                base_url="https://alternate.invalid/v1",
+                model="model-b",
+                concurrency=1,
+            )
+            _provider_sha, input_sha, _cache_key = annotation_cache_key(
+                changed_provider,
+                self.prompt,
+                videos,
+            )
+            portable_resume = incomplete_annotation_run_id(
+                conn,
+                snapshot_id=self.snapshot,
+                requested_model=None,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+            )
+            strict_resume = incomplete_annotation_run_id(
+                conn,
+                snapshot_id=self.snapshot,
+                requested_model=changed_provider.model,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+            )
+
+        self.assertEqual(portable_resume, run_id)
+        self.assertIsNone(strict_resume)
+
+    def test_semantic_complete_run_is_reusable_across_provider_model_changes(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=1,
+            )
+            result = AnnotationRunResult(
+                annotations=(self._annotation(videos[0].video_id),),
+                batches=(
+                    AnnotationBatchResult(
+                        annotations=(self._annotation(videos[0].video_id),),
+                        input_sha256=evidence_hash(videos),
+                        usage={},
+                        response_model=self.provider.model,
+                    ),
+                ),
+            )
+            run_id = store_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                result=result,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation"},
+            )
+            changed_provider = ProviderConfig(
+                name="alternate",
+                preset="generic",
+                base_url="https://alternate.invalid/v1",
+                model="model-b",
+                concurrency=1,
+            )
+            changed_sha, input_sha, _cache_key = annotation_cache_key(
+                changed_provider,
+                self.prompt,
+                videos,
+            )
+            exact = cached_annotation_run_id(
+                conn,
+                snapshot_id=self.snapshot,
+                provider_sha256=changed_sha,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                required_context={"stage": "semantic_annotation"},
+            )
+            reusable = reusable_annotation_run_id(
+                conn,
+                snapshot_id=self.snapshot,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                required_context={"stage": "semantic_annotation"},
+            )
+
+        self.assertIsNone(exact)
+        self.assertEqual(reusable, run_id)
+
+    def test_incomplete_resume_prefers_most_progressed_compatible_run(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=2,
+            )
+            progressed_run = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation"},
+            )
+            first = AnnotationBatchResult(
+                annotations=(self._annotation(videos[0].video_id),),
+                input_sha256=evidence_hash([videos[0]]),
+                usage={},
+                response_model=self.provider.model,
+            )
+            store_annotation_batch(
+                conn,
+                run_id=progressed_run,
+                batch_index=0,
+                videos=[videos[0]],
+                result=first,
+                provider=self.provider,
+            )
+            newer_empty_run = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=ProviderConfig(
+                    name="alternate",
+                    preset="generic",
+                    base_url="https://alternate.invalid/v1",
+                    model="model-b",
+                    concurrency=1,
+                ),
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"stage": "semantic_annotation"},
+            )
+            self.assertGreater(newer_empty_run, progressed_run)
             _provider_sha, input_sha, _cache_key = annotation_cache_key(
                 self.provider,
                 self.prompt,
@@ -796,14 +950,15 @@ Telecoms = "Telephony, radio, networking and modems."
             resumed = incomplete_annotation_run_id(
                 conn,
                 snapshot_id=self.snapshot,
-                requested_model="different-model",
+                requested_model=None,
                 prompt_sha256=self.prompt.sha256,
                 input_sha256=input_sha,
                 videos=videos,
                 batch_size=1,
+                required_context={"stage": "semantic_annotation"},
             )
 
-        self.assertIsNone(resumed)
+        self.assertEqual(resumed, progressed_run)
 
     def test_annotation_resume_skips_checkpointed_batches(self) -> None:
         videos = [
