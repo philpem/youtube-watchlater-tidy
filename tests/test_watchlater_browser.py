@@ -8,7 +8,13 @@ from pathlib import Path
 from youtube_watchlater_tidy.db import open_catalogue
 from youtube_watchlater_tidy.importer import import_watchlater_json
 from youtube_watchlater_tidy.triage import apply_selection_action, select_title
-from youtube_watchlater_tidy.watchlater_browser import BrowserRemovalAttempt, execute_removal_plan
+from youtube_watchlater_tidy.watchlater_browser import (
+    BrowserRemovalAttempt,
+    BrowserScanEvent,
+    PlaywrightWatchLaterClient,
+    _ScrollMetrics,
+    execute_removal_plan,
+)
 from youtube_watchlater_tidy.watchlater_removal import create_removal_plan, removal_plan_payload
 
 
@@ -30,6 +36,67 @@ class FakeBrowser:
 
     def close(self) -> None:
         pass
+
+
+class FakeBatchBrowser:
+    def __init__(self, loaded_ids: list[str], *, complete: bool = True) -> None:
+        self.loaded_ids = loaded_ids
+        self.complete = complete
+        self.scan_calls: list[set[str]] = []
+        self.remove_calls: list[str] = []
+
+    def scan_matching_videos(self, video_ids: set[str]):
+        self.scan_calls.append(set(video_ids))
+        matched = []
+        for video_id in self.loaded_ids:
+            if video_id in video_ids:
+                matched.append(video_id)
+                yield BrowserScanEvent("candidate", video_id=video_id)
+        remaining = tuple(sorted(video_ids - set(matched)))
+        yield BrowserScanEvent("finished", remaining_video_ids=remaining, complete=self.complete)
+
+    def remove_loaded_video(self, video_id: str) -> BrowserRemovalAttempt:
+        self.remove_calls.append(video_id)
+        return BrowserRemovalAttempt("removed")
+
+    def remove_video(self, video_id: str) -> BrowserRemovalAttempt:
+        raise AssertionError("single-video scan must not be used by a batch client")
+
+    def close(self) -> None:
+        pass
+
+
+class ScriptedScanClient(PlaywrightWatchLaterClient):
+    def __init__(
+        self,
+        loaded_rounds: list[list[str]],
+        metrics: list[_ScrollMetrics],
+        *,
+        stable_rounds: int = 2,
+    ) -> None:
+        self.loaded_rounds = list(loaded_rounds)
+        self.metrics = list(metrics)
+        self.max_scrolls = 20
+        self.scroll_pause = 0
+        self.stable_rounds = stable_rounds
+        self.progress = None
+        self.scroll_calls = 0
+
+    def _navigate_watch_later_start(self) -> None:
+        pass
+
+    def _loaded_video_ids(self) -> list[str]:
+        if len(self.loaded_rounds) > 1:
+            return self.loaded_rounds.pop(0)
+        return self.loaded_rounds[0]
+
+    def _scroll_metrics(self) -> _ScrollMetrics:
+        if len(self.metrics) > 1:
+            return self.metrics.pop(0)
+        return self.metrics[0]
+
+    def _scroll_to_bottom(self) -> None:
+        self.scroll_calls += 1
 
 
 class WatchLaterBrowserExecutorTests(unittest.TestCase):
@@ -123,6 +190,87 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
         self.assertEqual(retry.calls, ["video00000C"])
         self.assertEqual(second.run_status, "complete")
         self.assertEqual(payload["status"], "complete")
+
+    def test_batch_client_removes_loaded_matches_in_one_scan(self) -> None:
+        fake = FakeBatchBrowser(["video00000C", "unplanned001", "video00000A"])
+        progress: list[str] = []
+        with open_catalogue(self.db_path) as conn:
+            result = execute_removal_plan(
+                conn,
+                self.plan.run_id,
+                client=fake,
+                apply=True,
+                confirmed=True,
+                retries=0,
+                interval=0,
+                backoff=0,
+                progress=progress.append,
+            )
+            payload = removal_plan_payload(conn, self.plan.run_id)
+
+        self.assertEqual(len(fake.scan_calls), 1)
+        self.assertEqual(fake.remove_calls, ["video00000C", "video00000A"])
+        self.assertEqual(result.removed, 2)
+        self.assertEqual(result.already_absent, 1)
+        self.assertEqual(result.run_status, "complete")
+        statuses = {row["video_id"]: row["status"] for row in payload["items"]}
+        self.assertEqual(statuses["video00000B"], "already_absent")
+        self.assertTrue(any("checkpoint saved" in line for line in progress))
+
+    def test_incomplete_batch_scan_leaves_unseen_items_retriable(self) -> None:
+        fake = FakeBatchBrowser(["video00000A"], complete=False)
+        with open_catalogue(self.db_path) as conn:
+            result = execute_removal_plan(
+                conn,
+                self.plan.run_id,
+                client=fake,
+                apply=True,
+                confirmed=True,
+                retries=0,
+                interval=0,
+                backoff=0,
+            )
+
+        self.assertEqual(result.removed, 1)
+        self.assertEqual(result.not_found, 2)
+        self.assertEqual(result.run_status, "partial")
+
+    def test_single_scan_yields_loaded_matches_before_scrolling(self) -> None:
+        client = ScriptedScanClient(
+            [["video00000A", "other000001"], ["video00000B", "other000001"]],
+            [_ScrollMetrics(0, 100, 1000)],
+        )
+
+        events = list(client.scan_matching_videos({"video00000A", "video00000B"}))
+
+        self.assertEqual(
+            [(event.kind, event.video_id) for event in events],
+            [
+                ("candidate", "video00000A"),
+                ("candidate", "video00000B"),
+                ("finished", None),
+            ],
+        )
+        self.assertEqual(client.scroll_calls, 0)
+
+    def test_stable_end_ignores_dynamic_document_height(self) -> None:
+        client = ScriptedScanClient(
+            [["other000001"]],
+            [
+                _ScrollMetrics(900, 100, 1000),
+                _ScrollMetrics(901, 100, 1001),
+                _ScrollMetrics(902, 100, 1002),
+            ],
+            stable_rounds=2,
+        )
+
+        events = list(client.scan_matching_videos({"missing0001"}))
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, "finished")
+        self.assertTrue(events[0].complete)
+        self.assertEqual(events[0].remaining_video_ids, ("missing0001",))
+        self.assertEqual(client.scroll_calls, 2)
 
     def test_max_deletes_caps_clicks_and_resume_skips_completed(self) -> None:
         fake = FakeBrowser(

@@ -128,6 +128,22 @@ watchlater-remove execute --help
 The executor fails closed when it cannot verify exact video/destination identity. Do not
 weaken those identity checks to work around UI drift.
 
+## Watch Later removal appears stuck near the bottom
+
+Current releases print scan progress to stderr. The executor inspects all loaded rows,
+removes every exact-ID match, and only scrolls when none of those rows is a pending removal.
+At the bottom it waits for stable playlist content so a slow continuation load is not
+mistaken for the end.
+
+You can interrupt with Ctrl-C and inspect the saved per-video checkpoints:
+
+```bash
+watchlater-remove show
+```
+
+Rerun the same `execute` command to resume. For an initial live test, add
+`--max-deletes 1`; this caps destructive clicks without discarding the plan.
+
 ## Archive recovery is slow or rate-limited
 
 FindYouTubeVideo queries several services and one video can take tens of seconds. Streamed

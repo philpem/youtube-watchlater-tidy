@@ -137,17 +137,22 @@ Completed `removed` / `already_absent` rows are terminal checkpoints and are ski
 
 ## Exact-ID browser behavior
 
-For each planned video the browser adapter:
+The browser adapter makes one forward pass through Watch Later for all pending plan items:
 
-1. opens Watch Later;
-2. progressively scrolls until an exact `v=VIDEO_ID` row is found or the loaded playlist is stable;
-3. verifies the exact video ID from the row URL;
-4. opens that row's action menu;
-5. verifies identity again immediately before the destructive click;
-6. clicks the configured `Remove from Watch later` item;
-7. confirms the exact row disappeared before returning `removed`.
+1. it opens Watch Later at the top and reads the exact video IDs from all currently loaded rows;
+2. it removes every loaded row whose ID is in the reviewed removal plan;
+3. before each click, it rechecks the exact current decision and verifies the row ID again;
+4. it checkpoints each confirmed removal immediately;
+5. only when no loaded row matches does it scroll to request more rows;
+6. it stops when the playlist content is stable at the actual bottom.
 
-If a stable full scan contains no exact ID, the result is `already_absent`. If the configured scroll limit is reached first, the result is `not_found` and remains retriable.
+This avoids rescanning a large playlist once per planned video. Page-height jitter is not
+used as the end-of-list signal; the scanner uses bottom position plus stable loaded video
+identity. Progress is printed to stderr while the scan runs.
+
+After a stable complete scan, planned IDs never encountered are checkpointed
+`already_absent`. If the configured scroll limit is reached first, unresolved IDs become
+`not_found` and remain retriable.
 
 Useful localization/UI options:
 
@@ -194,6 +199,10 @@ A small `--max-deletes` is recommended for initial real-world testing because Yo
 - `skipped` — intentionally deferred.
 
 `removed` and `already_absent` are terminal success states. `not_found`, `failed`, and `skipped` are eligible for later retry. The imported catalogue/snapshot remains intact after successful removal.
+
+It is safe to interrupt with Ctrl-C. Confirmed rows are checkpointed immediately; rerunning
+the same plan resumes the remaining items. If interruption happens after a YouTube click but
+before its checkpoint, the next complete scan reconciles that exact ID as already absent.
 
 ## Headless mode
 

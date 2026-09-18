@@ -5,7 +5,8 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from collections.abc import Iterator
+from typing import Callable, Protocol
 from urllib.parse import parse_qs, urlparse
 
 from .browser_session import DEFAULT_CDP_ENDPOINT, PlaywrightBrowserSession
@@ -25,6 +26,25 @@ DEFAULT_BROWSER_PROFILE = Path(".watchlater-playwright-profile")
 class BrowserRemovalAttempt:
     status: str
     detail: str | None = None
+
+
+@dataclass(frozen=True)
+class BrowserScanEvent:
+    kind: str
+    video_id: str | None = None
+    remaining_video_ids: tuple[str, ...] = ()
+    complete: bool = False
+
+
+@dataclass(frozen=True)
+class _ScrollMetrics:
+    top: int
+    viewport: int
+    height: int
+
+    @property
+    def at_bottom(self) -> bool:
+        return self.top + self.viewport >= self.height - 4
 
 
 @dataclass(frozen=True)
@@ -73,6 +93,7 @@ class PlaywrightWatchLaterClient:
         max_scrolls: int = 250,
         scroll_pause: float = 0.7,
         stable_rounds: int = 4,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         if max_scrolls < 1:
             raise ValueError("max_scrolls must be at least 1")
@@ -93,6 +114,7 @@ class PlaywrightWatchLaterClient:
         self.max_scrolls = max_scrolls
         self.scroll_pause = scroll_pause
         self.stable_rounds = stable_rounds
+        self.progress = progress
         self._loaded = False
 
     def close(self) -> None:
@@ -116,6 +138,188 @@ class PlaywrightWatchLaterClient:
                 if _video_id_from_href(anchors.nth(anchor_index).get_attribute("href")) == video_id:
                     return row
         return None
+
+    def _emit(self, message: str) -> None:
+        if self.progress is not None:
+            self.progress(message)
+
+    def _navigate_watch_later_start(self) -> None:
+        self._page.goto(WATCH_LATER_URL, wait_until="domcontentloaded")
+        self._page.wait_for_timeout(700)
+        self._page.evaluate("window.scrollTo(0, 0)")
+        self._loaded = True
+
+    def _loaded_video_ids(self) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        rows = self._page.locator("ytd-playlist-video-renderer")
+        for index in range(rows.count()):
+            anchors = rows.nth(index).locator('a[href*="watch"]')
+            video_id = None
+            for anchor_index in range(anchors.count()):
+                video_id = _video_id_from_href(
+                    anchors.nth(anchor_index).get_attribute("href")
+                )
+                if video_id:
+                    break
+            if video_id and video_id not in seen:
+                seen.add(video_id)
+                result.append(video_id)
+        return result
+
+    def _scroll_metrics(self) -> _ScrollMetrics:
+        value = self._page.evaluate(
+            """() => {
+                const body = document.body;
+                const root = document.documentElement;
+                const top = window.scrollY || root.scrollTop || (body && body.scrollTop) || 0;
+                const height = Math.max(
+                    body ? body.scrollHeight : 0,
+                    root ? root.scrollHeight : 0
+                );
+                return {top: top, viewport: window.innerHeight, height: height};
+            }"""
+        )
+        return _ScrollMetrics(
+            top=int(value["top"]),
+            viewport=int(value["viewport"]),
+            height=int(value["height"]),
+        )
+
+    def _scroll_to_bottom(self) -> None:
+        self._page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+        if self.scroll_pause:
+            self._page.wait_for_timeout(int(self.scroll_pause * 1000))
+
+    def scan_matching_videos(self, video_ids: set[str]) -> Iterator[BrowserScanEvent]:
+        """Yield matching loaded rows during one top-to-bottom Watch Later scan."""
+
+        pending = set(video_ids)
+        self._navigate_watch_later_start()
+        self._emit(f"Scanning Watch Later for {len(pending)} planned video(s)")
+        stable = 0
+        last_content: tuple[int, tuple[str, ...]] | None = None
+
+        for scroll_index in range(self.max_scrolls):
+            if not pending:
+                yield BrowserScanEvent("finished", complete=True)
+                return
+
+            loaded_ids = self._loaded_video_ids()
+            matches = [video_id for video_id in loaded_ids if video_id in pending]
+            if matches:
+                self._emit(
+                    f"Found {len(matches)} planned video(s) in the loaded rows; "
+                    f"{len(pending)} remain in this scan"
+                )
+                for video_id in matches:
+                    pending.remove(video_id)
+                    yield BrowserScanEvent("candidate", video_id=video_id)
+                stable = 0
+                last_content = None
+                continue
+
+            metrics = self._scroll_metrics()
+            content = (len(loaded_ids), tuple(loaded_ids[-3:]))
+            if metrics.at_bottom and content == last_content:
+                stable += 1
+            else:
+                stable = 0
+
+            if metrics.at_bottom:
+                self._emit(
+                    f"At the loaded end of Watch Later; waiting for more rows "
+                    f"({stable}/{self.stable_rounds} stable checks)"
+                )
+            elif scroll_index == 0 or (scroll_index + 1) % 10 == 0:
+                self._emit(
+                    f"Loaded {len(loaded_ids)} Watch Later row(s); "
+                    f"scroll {scroll_index + 1}/{self.max_scrolls}"
+                )
+
+            if stable >= self.stable_rounds:
+                self._emit(
+                    f"Completed one Watch Later scan; {len(pending)} planned video(s) absent"
+                )
+                yield BrowserScanEvent(
+                    "finished",
+                    remaining_video_ids=tuple(sorted(pending)),
+                    complete=True,
+                )
+                return
+
+            last_content = content
+            self._scroll_to_bottom()
+
+        self._emit(
+            f"Stopped at the configured {self.max_scrolls}-scroll limit; "
+            f"{len(pending)} planned video(s) were not resolved"
+        )
+        yield BrowserScanEvent(
+            "finished",
+            remaining_video_ids=tuple(sorted(pending)),
+            complete=False,
+        )
+
+    def remove_loaded_video(self, video_id: str) -> BrowserRemovalAttempt:
+        """Remove one exact ID which the current single-pass scan has already loaded."""
+
+        row = self._matching_row(video_id)
+        if row is None:
+            return BrowserRemovalAttempt(
+                "not_found",
+                "exact row disappeared after it was matched in the loaded Watch Later rows",
+            )
+
+        return self._remove_row(video_id, row)
+
+    def _remove_row(self, video_id: str, row) -> BrowserRemovalAttempt:
+        row.scroll_into_view_if_needed()
+        title_anchor = row.locator('a[href*="watch"]').first
+        actual = _video_id_from_href(title_anchor.get_attribute("href"))
+        if actual != video_id:
+            raise RuntimeError(
+                f"row identity changed before menu click: expected {video_id!r}, found {actual!r}"
+            )
+
+        menu = row.locator(f'button[aria-label="{self.action_menu_label}"]')
+        if menu.count() == 0:
+            menu = row.locator("#menu button")
+        if menu.count() == 0:
+            raise RuntimeError(
+                f"could not find action menu for exact Watch Later row {video_id}; "
+                "YouTube DOM or localization may have changed"
+            )
+        menu.first.click()
+
+        option = self._page.get_by_text(self.remove_label, exact=True)
+        if option.count() == 0:
+            option = self._page.locator("ytd-menu-service-item-renderer").filter(
+                has_text=self.remove_label
+            )
+        if option.count() == 0:
+            self._page.keyboard.press("Escape")
+            raise RuntimeError(
+                f"could not find menu item {self.remove_label!r}; use --remove-label for "
+                "the current YouTube language/UI"
+            )
+
+        actual = _video_id_from_href(title_anchor.get_attribute("href"))
+        if actual != video_id:
+            self._page.keyboard.press("Escape")
+            raise RuntimeError(
+                f"row identity changed before removal: expected {video_id!r}, found {actual!r}"
+            )
+        option.first.click()
+
+        try:
+            row.wait_for(state="detached", timeout=5000)
+        except Exception:
+            if self._matching_row(video_id) is not None:
+                raise RuntimeError(
+                    f"remove command was clicked for {video_id}, but the exact row remained visible"
+                )
+        return BrowserRemovalAttempt("removed")
 
     def _find_row_by_scrolling(self, video_id: str):
         self._ensure_watch_later()
@@ -158,54 +362,7 @@ class PlaywrightWatchLaterClient:
                 "not_found",
                 "exact video ID was not found before the configured scroll limit",
             )
-
-        row.scroll_into_view_if_needed()
-        title_anchor = row.locator('a[href*="watch"]').first
-        actual = _video_id_from_href(title_anchor.get_attribute("href"))
-        if actual != video_id:
-            raise RuntimeError(
-                f"row identity changed before menu click: expected {video_id!r}, found {actual!r}"
-            )
-
-        menu = row.locator(f'button[aria-label="{self.action_menu_label}"]')
-        if menu.count() == 0:
-            menu = row.locator("#menu button")
-        if menu.count() == 0:
-            raise RuntimeError(
-                f"could not find action menu for exact Watch Later row {video_id}; "
-                "YouTube DOM or localization may have changed"
-            )
-        menu.first.click()
-
-        option = self._page.get_by_text(self.remove_label, exact=True)
-        if option.count() == 0:
-            option = self._page.locator("ytd-menu-service-item-renderer").filter(
-                has_text=self.remove_label
-            )
-        if option.count() == 0:
-            self._page.keyboard.press("Escape")
-            raise RuntimeError(
-                f"could not find menu item {self.remove_label!r}; use --remove-label for "
-                "the current YouTube language/UI"
-            )
-
-        # Re-check exact identity immediately before the destructive click.
-        actual = _video_id_from_href(title_anchor.get_attribute("href"))
-        if actual != video_id:
-            self._page.keyboard.press("Escape")
-            raise RuntimeError(
-                f"row identity changed before removal: expected {video_id!r}, found {actual!r}"
-            )
-        option.first.click()
-
-        try:
-            row.wait_for(state="detached", timeout=5000)
-        except Exception:
-            if self._matching_row(video_id) is not None:
-                raise RuntimeError(
-                    f"remove command was clicked for {video_id}, but the exact row remained visible"
-                )
-        return BrowserRemovalAttempt("removed")
+        return self._remove_row(video_id, row)
 
 
 def open_login_session(
@@ -244,6 +401,7 @@ def execute_removal_plan(
     retries: int = 1,
     backoff: float = 2.0,
     sleeper: Callable[[float], None] = time.sleep,
+    progress: Callable[[str], None] | None = None,
 ) -> BrowserRemovalResult:
     if max_deletes is not None and max_deletes < 0:
         raise ValueError("--max-deletes cannot be negative")
@@ -284,13 +442,20 @@ def execute_removal_plan(
         conn.execute("UPDATE watchlater_removal_runs SET status = 'running' WHERE id = ?", (run_id,))
 
     removed = absent = not_found = failed = stale_runtime = destructive = 0
-    for item in pending:
-        if max_deletes is not None and destructive >= max_deletes:
-            break
+
+    def emit(message: str) -> None:
+        if progress is not None:
+            progress(message)
+
+    def process_candidate(item: sqlite3.Row, remover: Callable[[str], BrowserRemovalAttempt]) -> None:
+        nonlocal removed, absent, not_found, failed, stale_runtime, destructive
         if not removal_item_is_authorized(conn, run, item):
             stale_runtime += 1
-            continue
+            emit(f"Skipping stale removal decision for {item['video_id']}")
+            return
 
+        video_id = str(item["video_id"])
+        emit(f"Removing exact Watch Later video {video_id}")
         final: BrowserRemovalAttempt | None = None
         last_error: Exception | None = None
         for attempt_index in range(retries + 1):
@@ -299,7 +464,7 @@ def execute_removal_plan(
                 final = None
                 break
             try:
-                candidate = client.remove_video(str(item["video_id"]))
+                candidate = remover(video_id)
                 if candidate.status not in {"removed", "already_absent", "not_found"}:
                     raise RuntimeError(f"browser client returned invalid status {candidate.status!r}")
                 final = candidate
@@ -313,7 +478,7 @@ def execute_removal_plan(
                 sleeper(backoff * (2**attempt_index))
 
         if final is None and last_error is None:
-            continue
+            return
         if final is None:
             failed += 1
             checkpoint_removal(
@@ -323,7 +488,8 @@ def execute_removal_plan(
                 status="failed",
                 error=str(last_error),
             )
-            continue
+            emit(f"Failed {video_id}: {last_error}")
+            return
 
         if final.status == "removed":
             removed += 1
@@ -335,6 +501,7 @@ def execute_removal_plan(
                 status="removed",
                 error=final.detail,
             )
+            emit(f"Removed {video_id}; checkpoint saved")
             if interval:
                 sleeper(interval)
         elif final.status == "already_absent":
@@ -346,6 +513,7 @@ def execute_removal_plan(
                 status="already_absent",
                 error=final.detail,
             )
+            emit(f"Already absent {video_id}; checkpoint saved")
         else:
             not_found += 1
             checkpoint_removal(
@@ -355,6 +523,54 @@ def execute_removal_plan(
                 status="not_found",
                 error=final.detail,
             )
+            emit(f"Not found {video_id}; left retriable")
+
+    scan_matching = getattr(client, "scan_matching_videos", None)
+    remove_loaded = getattr(client, "remove_loaded_video", None)
+    if callable(scan_matching) and callable(remove_loaded):
+        items_by_video = {str(item["video_id"]): item for item in pending}
+        for event in scan_matching(set(items_by_video)):
+            if event.kind == "candidate":
+                if max_deletes is not None and destructive >= max_deletes:
+                    emit(f"Reached --max-deletes {max_deletes}; remaining items stay resumable")
+                    break
+                if event.video_id is None or event.video_id not in items_by_video:
+                    raise RuntimeError("browser scan returned an unknown removal candidate")
+                process_candidate(items_by_video[event.video_id], remove_loaded)
+                continue
+
+            if event.kind != "finished":
+                raise RuntimeError(f"browser scan returned invalid event {event.kind!r}")
+            terminal_status = "already_absent" if event.complete else "not_found"
+            detail = (
+                "exact video ID was not present after one stable full Watch Later scan"
+                if event.complete
+                else "exact video ID was not resolved before the configured scroll limit"
+            )
+            for video_id in event.remaining_video_ids:
+                item = items_by_video.get(video_id)
+                if item is None:
+                    raise RuntimeError("browser scan returned an unknown unresolved video ID")
+                if not removal_item_is_authorized(conn, run, item):
+                    stale_runtime += 1
+                    continue
+                checkpoint_removal(
+                    conn,
+                    run_id=run_id,
+                    ordinal=int(item["ordinal"]),
+                    status=terminal_status,
+                    error=detail,
+                )
+                if event.complete:
+                    absent += 1
+                else:
+                    not_found += 1
+            break
+    else:
+        for item in pending:
+            if max_deletes is not None and destructive >= max_deletes:
+                break
+            process_candidate(item, client.remove_video)
 
     status, remaining = finish_removal_run(conn, run_id)
     return BrowserRemovalResult(
