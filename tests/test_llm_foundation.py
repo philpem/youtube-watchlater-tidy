@@ -476,6 +476,40 @@ guidance = "Prefer review when evidence is weak."
         self.assertEqual(response.finish_reason, "length")
         self.assertEqual(response.model, "reasoning/model")
 
+    def test_chat_preserves_content_filter_finish_with_null_content(self) -> None:
+        provider = ProviderConfig(
+            name="openrouter",
+            preset="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="filtered/model",
+            retries=0,
+        )
+
+        def opener(request, timeout):
+            return _FakeResponse(
+                {
+                    "model": "filtered/model",
+                    "choices": [
+                        {
+                            "finish_reason": "content_filter",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                            },
+                        }
+                    ],
+                }
+            )
+
+        response = chat(
+            provider,
+            [{"role": "user", "content": "probe"}],
+            opener=opener,
+        )
+        self.assertEqual(response.content, "")
+        self.assertEqual(response.finish_reason, "content_filter")
+        self.assertEqual(response.model, "filtered/model")
+
     def test_chat_reports_provider_refusal_with_null_content(self) -> None:
         provider = ProviderConfig(
             name="openrouter",
