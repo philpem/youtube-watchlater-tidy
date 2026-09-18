@@ -7,11 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from .creator_metadata import (
-    primary_creator_index,
-    primary_creator_key,
-    row_matches_creator,
-)
+from .creator_metadata import primary_creator_index, row_matches_creator
 from .reports import latest_snapshot_id
 
 ACTIONS = ("keep", "review", "archive", "delete", "move")
