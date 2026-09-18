@@ -238,18 +238,37 @@ concurrency = 1
             )
 
         self.assertEqual(rc, 0)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["source_run_id"], self.source_run_id)
-        self.assertNotEqual(payload["run_id"], self.source_run_id)
-        self.assertEqual(payload["provider"], "alternate")
-        self.assertEqual(payload["configured_model"], "alternate-model")
-        self.assertEqual(payload["video_count"], 1)
-        self.assertEqual(payload["annotations"][0]["primary_category"], "Retrocomputing")
+        rendered = stdout.getvalue()
+        self.assertIn("Content-filter retry run ", rendered)
+        self.assertIn("complete; 1 video(s), 1 batch(es), cache=miss", rendered)
+        self.assertIn(f"source_run={self.source_run_id}", rendered)
+        self.assertIn("watchlater-llm annotation-results --run-id", rendered)
+        self.assertNotIn('"annotations"', rendered)
 
         with open_catalogue(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id
+                FROM llm_annotation_runs
+                WHERE id != ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (self.source_run_id,),
+            ).fetchone()
+            assert row is not None
+            retry_run_id = int(row["id"])
             source_payload = annotation_run_payload(conn, self.source_run_id)
-            retry_payload = annotation_run_payload(conn, payload["run_id"])
+            retry_payload = annotation_run_payload(conn, retry_run_id)
 
+        self.assertNotEqual(retry_run_id, self.source_run_id)
+        self.assertEqual(retry_payload["provider"], "alternate")
+        self.assertEqual(retry_payload["configured_model"], "alternate-model")
+        self.assertEqual(retry_payload["video_count"], 1)
+        self.assertEqual(
+            retry_payload["annotations"][0]["primary_category"],
+            "Retrocomputing",
+        )
         self.assertEqual(source_payload["annotations"][1]["tags"], ["content-filtered"])
         self.assertEqual(retry_payload["context"]["stage"], "content_filter_retry")
         self.assertEqual(retry_payload["context"]["source_run_id"], self.source_run_id)
