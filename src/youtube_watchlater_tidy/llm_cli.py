@@ -14,10 +14,14 @@ from .llm_annotation import (
 )
 from .llm_annotation_store import (
     annotation_cache_key,
+    annotation_completed_batch_indexes,
     annotation_run_payload,
+    begin_annotation_run,
     cached_annotation_run_id,
+    complete_annotation_run,
+    incomplete_annotation_run_id,
     latest_annotation_run_id,
-    store_annotation_run,
+    store_annotation_batch,
 )
 from .llm_classification import (
     classification_evidence,
@@ -514,6 +518,16 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             if videos
             else (None, None, None)
         )
+        context = {
+            "stage": "semantic_annotation",
+            "scope": args.scope,
+            "batch_size": args.batch_size,
+            **taxonomy_context,
+        }
+
+        run_id: int | None = None
+        completed_batch_indexes: set[int] = set()
+        resumed = False
 
         if videos and not args.dry_run and not args.no_store and not args.refresh:
             cached = cached_annotation_run_id(
@@ -528,6 +542,31 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 output["cache"] = "hit"
                 print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
                 return 0
+
+            partial = incomplete_annotation_run_id(
+                conn,
+                snapshot_id=snapshot_id,
+                provider_sha256=provider_sha,
+                prompt_sha256=prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=args.batch_size,
+            )
+            if partial is not None:
+                run_id = partial
+                completed_batch_indexes = annotation_completed_batch_indexes(conn, run_id)
+                resumed = True
+                completed_videos = sum(
+                    len(videos[index * args.batch_size : (index + 1) * args.batch_size])
+                    for index in completed_batch_indexes
+                )
+                print(
+                    f"Resuming annotation run {run_id}: "
+                    f"{len(completed_batch_indexes)} batch(es), "
+                    f"{completed_videos}/{len(videos)} video(s) already checkpointed",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         if args.dry_run:
             output = {
@@ -552,22 +591,34 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
 
-    with ConsoleProgress(selected_progress_mode(args)) as progress:
-        result = annotate(
-            provider,
-            prompt,
-            videos,
-            batch_size=args.batch_size,
-            progress=progress,
-            phase="LLM annotation",
-        )
-    context = {
-        "stage": "semantic_annotation",
-        "scope": args.scope,
-        **taxonomy_context,
-    }
+        if not args.no_store and run_id is None:
+            run_id = begin_annotation_run(
+                conn,
+                snapshot_id=snapshot_id,
+                selection_id=args.selection,
+                provider=provider,
+                prompt=prompt,
+                videos=videos,
+                taxonomy_source=annotation_taxonomy_source,
+                context=context,
+            )
+            print(
+                f"Started checkpointed annotation run {run_id} "
+                f"for {len(videos)} video(s)",
+                file=sys.stderr,
+                flush=True,
+            )
 
     if args.no_store:
+        with ConsoleProgress(selected_progress_mode(args)) as progress:
+            result = annotate(
+                provider,
+                prompt,
+                videos,
+                batch_size=args.batch_size,
+                progress=progress,
+                phase="LLM annotation",
+            )
         output = _annotation_ephemeral_payload(
             provider,
             prompt,
@@ -579,20 +630,38 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    with open_catalogue(args.db) as conn:
-        run_id = store_annotation_run(
-            conn,
-            snapshot_id=snapshot_id,
-            selection_id=args.selection,
-            provider=provider,
-            prompt=prompt,
-            videos=videos,
-            result=result,
-            taxonomy_source=annotation_taxonomy_source,
-            context=context,
-        )
-        output = annotation_run_payload(conn, run_id)
-    output["cache"] = "refresh" if args.refresh else "miss"
+    assert run_id is not None
+    with open_catalogue(args.db) as checkpoint_conn:
+        def checkpoint_batch(index, batch, batch_result) -> None:
+            store_annotation_batch(
+                checkpoint_conn,
+                run_id=run_id,
+                batch_index=index,
+                videos=batch,
+                result=batch_result,
+            )
+
+        with ConsoleProgress(selected_progress_mode(args)) as progress:
+            annotate(
+                provider,
+                prompt,
+                videos,
+                batch_size=args.batch_size,
+                progress=progress,
+                phase="LLM annotation",
+                completed_batch_indexes=completed_batch_indexes,
+                on_batch=checkpoint_batch,
+            )
+        complete_annotation_run(checkpoint_conn, run_id)
+        output = annotation_run_payload(checkpoint_conn, run_id)
+
+    output["cache"] = (
+        "resume"
+        if resumed
+        else "refresh"
+        if args.refresh
+        else "miss"
+    )
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
