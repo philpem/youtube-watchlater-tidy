@@ -195,7 +195,7 @@ def merge_usage(*usages: dict[str, Any]) -> dict[str, Any]:
     """Combine OpenAI-compatible usage payloads from multiple attempts."""
 
     def merge_value(left: Any, right: Any) -> Any:
-        if isinstance(left, dict) && isinstance(right, dict):
+        if isinstance(left, dict) and isinstance(right, dict):
             merged = dict(left)
             for key, value in right.items():
                 merged[key] = merge_value(merged[key], value) if key in merged else value
