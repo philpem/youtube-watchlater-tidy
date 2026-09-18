@@ -54,6 +54,10 @@ Paths in an interest profile are relative to the TOML file. Provider `extra` tab
 pass runtime-specific OpenAI-compatible request parameters, for example
 `reasoning_effort`, but reserved request fields cannot be overridden there.
 
+If `max_tokens` is omitted from a provider, the client sends a default output limit of
+`6000`. This is sized for the structured multi-video classification/annotation batches;
+providers can override it per profile when a model needs a tighter or larger ceiling.
+
 ### Semantic review categories
 
 The action classifier's free-form topic is useful as evidence, but large-catalogue browsing

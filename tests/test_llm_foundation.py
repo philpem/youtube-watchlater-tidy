@@ -82,8 +82,18 @@ guidance = "Prefer review when evidence is weak."
         local = config.provider()
         self.assertEqual(local.base_url, "http://127.0.0.1:11434/v1")
         self.assertEqual(local.model, "qwen3:14b")
+        self.assertEqual(local.max_tokens, 6000)
         profile = config.interest_profile()
         self.assertEqual(profile.file, self.interests.resolve())
+
+    def test_provider_max_tokens_can_override_default(self) -> None:
+        custom = self.root / "custom-max-tokens.toml"
+        custom.write_text(
+            '[providers.local]\npreset="ollama"\nmodel="qwen3:14b"\nmax_tokens=32768\n',
+            encoding="utf-8",
+        )
+        provider = load_project_config(custom).provider("local")
+        self.assertEqual(provider.max_tokens, 32768)
 
     def test_openrouter_preset_key_and_optional_headers(self) -> None:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-test"

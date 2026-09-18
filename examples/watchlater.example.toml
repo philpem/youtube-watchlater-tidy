@@ -8,7 +8,7 @@ default_interest_profile = "default"
 preset = "ollama"
 model = "qwen3:14b"
 temperature = 0.0
-max_tokens = 1200
+max_tokens = 6000
 structured_mode = "json_object"
 
 [providers.vllm-local]
