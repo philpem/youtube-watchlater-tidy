@@ -72,26 +72,31 @@ def incomplete_annotation_run_id(
     conn: sqlite3.Connection,
     *,
     snapshot_id: int,
-    provider_sha256: str,
+    requested_model: str,
     prompt_sha256: str,
     input_sha256: str,
     videos: list[Any],
     batch_size: int,
 ) -> int | None:
-    """Return the newest exact incomplete run whose stored batch boundaries still match."""
+    """Return the newest compatible incomplete run whose stored batches still match.
+
+    Resume identity intentionally ignores execution-only provider settings such as
+    streaming and max_tokens. Semantic identity is the requested model, prompt/taxonomy,
+    snapshot and complete input evidence hash.
+    """
 
     candidates = conn.execute(
         """
         SELECT id
         FROM llm_annotation_runs
         WHERE snapshot_id = ?
-          AND provider_sha256 = ?
+          AND requested_model = ?
           AND prompt_sha256 = ?
           AND input_sha256 = ?
           AND status = 'error'
         ORDER BY id DESC
         """,
-        (snapshot_id, provider_sha256, prompt_sha256, input_sha256),
+        (snapshot_id, requested_model, prompt_sha256, input_sha256),
     ).fetchall()
     batches = [
         videos[index : index + batch_size]
