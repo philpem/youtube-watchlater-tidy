@@ -118,11 +118,27 @@ class ReviewSemanticFacetTests(unittest.TestCase):
         self.assertEqual(row["current_decision"]["action"], "keep")
         self.assertIsNone(row["llm"])
         self.assertEqual(row["annotation"]["run_id"], self.run_id)
+        self.assertEqual(row["annotation"]["run_status"], "complete")
         self.assertEqual(row["annotation"]["primary_category"], "Retrocomputing")
         self.assertEqual(
             row["annotation"]["tags"],
             ["acorn", "archimedes", "hardware repair"],
         )
+
+    def test_review_rows_show_checkpointed_annotation_from_incomplete_run(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            conn.execute(
+                "UPDATE llm_annotation_runs SET status = 'error' WHERE id = ?",
+                (self.run_id,),
+            )
+            conn.commit()
+            _, rows = review_rows(conn, self.snapshot)
+
+        annotation = rows[0]["annotation"]
+        self.assertIsNotNone(annotation)
+        self.assertEqual(annotation["run_id"], self.run_id)
+        self.assertEqual(annotation["run_status"], "error")
+        self.assertEqual(annotation["primary_category"], "Retrocomputing")
 
     def test_html_exposes_clickable_semantic_facets(self) -> None:
         with open_catalogue(self.db_path) as conn:
