@@ -128,8 +128,13 @@ def classification_evidence(
     *,
     selection_id: int | None = None,
     limit: int | None = None,
+    include_decided: bool = False,
 ) -> list[ClassificationEvidence]:
-    """Return unresolved videos and cheap evidence suitable for first-pass LLM triage."""
+    """Return cheap video evidence for LLM work.
+
+    Action classification keeps the historical unresolved-only default. Semantic
+    annotation may opt into already-decided videos without mutating those decisions.
+    """
     if limit is not None and limit < 0:
         raise ValueError("--limit cannot be negative")
 
@@ -195,9 +200,10 @@ def classification_evidence(
         video_id = str(row["video_id"])
         if selected_ids is not None and video_id not in selected_ids:
             continue
-        # Human/rule decisions already exist in current_decisions. LLM work is
-        # intentionally limited to unresolved videos.
-        if row["current_action"] not in (None, "clear"):
+        # Action classification remains unresolved-only by default. Semantic
+        # annotation can include decided videos because annotations are stored
+        # separately and never supersede current_decisions.
+        if not include_decided and row["current_action"] not in (None, "clear"):
             continue
 
         original_title = str(row["original_title"] or "")
