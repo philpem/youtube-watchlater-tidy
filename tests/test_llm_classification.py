@@ -250,6 +250,90 @@ class LLMClassificationTests(unittest.TestCase):
         updates = [event for event in events if event.kind == "update"]
         self.assertEqual([event.completed for event in updates], [1, 2])
 
+    def test_truncated_classification_batch_recursively_splits_and_preserves_order(self) -> None:
+        videos = [
+            ClassificationEvidence(
+                video_id=f"video00000{suffix}",
+                playlist_position=index,
+                original_title=f"Video {suffix}",
+                recovered_title=None,
+                recovered_source=None,
+                dearrow_title=None,
+                channel="Test",
+                channel_id="UCTEST",
+                duration=1,
+                view_count=1,
+                upload_date=None,
+                availability=None,
+            )
+            for index, suffix in enumerate(("A", "B", "C", "D"), start=1)
+        ]
+        provider = ProviderConfig(
+            name="test",
+            preset="generic",
+            base_url="https://example.invalid/v1",
+            model="model-a",
+            concurrency=2,
+        )
+        prompt = RenderedPrompt(
+            system="system",
+            interest_brief="interests",
+            playlist_guidance="- Queue - Retrocomputing: retro",
+            profile_name="default",
+            sha256="prompt-hash",
+        )
+        calls: list[int] = []
+
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
+            batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
+            calls.append(len(batch))
+            usage = {"prompt_tokens": 1, "completion_tokens": 2}
+            if len(batch) > 1:
+                return ChatResponse(
+                    content="{",
+                    usage=usage,
+                    model="model-a",
+                    raw={},
+                    finish_reason="length",
+                )
+            video_id = batch[0]["video_id"]
+            return ChatResponse(
+                content=json.dumps({"classifications": [self._valid(video_id)]}),
+                usage=usage,
+                model="model-a",
+                raw={},
+                finish_reason="stop",
+            )
+
+        events = []
+        with patch("youtube_watchlater_tidy.llm_classification.chat", side_effect=fake_chat):
+            result = classify(
+                provider,
+                prompt,
+                videos,
+                playlists={"Queue - Retrocomputing"},
+                batch_size=4,
+                progress=events.append,
+            )
+
+        self.assertEqual(calls, [4, 2, 1, 1, 2, 1, 1])
+        self.assertEqual(
+            [item.video_id for item in result.suggestions],
+            [video.video_id for video in videos],
+        )
+        self.assertEqual(len(result.batches), 1)
+        self.assertEqual(result.batches[0].usage["prompt_tokens"], 7)
+        self.assertEqual(result.batches[0].usage["completion_tokens"], 14)
+        split_messages = [
+            event.detail or ""
+            for event in events
+            if event.kind == "message" and "output limit" in (event.detail or "")
+        ]
+        self.assertTrue(any("4 videos as 2 + 2" in message for message in split_messages))
+        self.assertEqual(events[-1].kind, "finish")
+        self.assertEqual(events[-1].completed, 4)
+
+
 
 if __name__ == "__main__":
     unittest.main()

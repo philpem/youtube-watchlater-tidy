@@ -191,6 +191,31 @@ def chat(
     assert last_error is not None
     raise RuntimeError(f"provider {provider.name!r} request failed: {last_error}")
 
+def merge_usage(*usages: dict[str, Any]) -> dict[str, Any]:
+    """Combine OpenAI-compatible usage payloads from multiple attempts."""
+
+    def merge_value(left: Any, right: Any) -> Any:
+        if isinstance(left, dict) and isinstance(right, dict):
+            merged = dict(left)
+            for key, value in right.items():
+                merged[key] = merge_value(merged[key], value) if key in merged else value
+            return merged
+        if (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+        ):
+            return left + right
+        return right
+
+    result: dict[str, Any] = {}
+    for usage in usages:
+        for key, value in usage.items():
+            result[key] = merge_value(result[key], value) if key in result else value
+    return result
+
+
 def parse_json_content(response: ChatResponse, provider_name: str) -> dict[str, Any]:
     try:
         value = json.loads(response.content)

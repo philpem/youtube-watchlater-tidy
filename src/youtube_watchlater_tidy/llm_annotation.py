@@ -10,7 +10,7 @@ from .llm_classification import ClassificationEvidence, evidence_hash
 from .llm_config import ProjectConfig, ProviderConfig
 from .llm_parallel import run_bounded_parallel
 from .llm_prompt import render_prompt
-from .llm_provider import ChatResponse, chat, parse_json_content
+from .llm_provider import ChatResponse, chat, merge_usage, parse_json_content
 from .progress import ProgressCallback, ProgressEvent
 
 
@@ -445,14 +445,7 @@ def annotate(
     completed_batches = 0
     responses_received = 0
 
-    def request(index: int, batch: list[ClassificationEvidence]) -> ChatResponse:
-        return _request_annotation_batch(provider, prompt, batch, progress, phase)
-
-    def on_response(
-        index: int,
-        batch: list[ClassificationEvidence],
-        response: ChatResponse,
-    ) -> None:
+    def note_response(label: str) -> None:
         nonlocal responses_received
         responses_received += 1
         if progress is not None:
@@ -463,19 +456,86 @@ def annotate(
                     completed=completed_videos,
                     total=len(videos),
                     unit="video",
-                    detail=(
-                        f"response {responses_received}/{len(batches)} received; "
-                        f"validating batch {index + 1}"
-                    ),
+                    detail=f"response {responses_received} received; validating {label}",
                 )
             )
 
-    def consume(
+    def request(index: int, batch: list[ClassificationEvidence]) -> ChatResponse:
+        return _request_annotation_batch(provider, prompt, batch, progress, phase)
+
+    def on_response(
         index: int,
         batch: list[ClassificationEvidence],
         response: ChatResponse,
+    ) -> None:
+        note_response(f"batch {index + 1}")
+
+    def validate_batch(
+        label: str,
+        batch: list[ClassificationEvidence],
+        response: ChatResponse,
     ) -> AnnotationBatchResult:
-        nonlocal completed_videos, completed_batches
+        if response.finish_reason == "length":
+            if len(batch) == 1:
+                error = RuntimeError(
+                    f"provider {provider.name!r} truncated a single-video annotation "
+                    f"response at max_tokens={provider.max_tokens}; increase "
+                    f"providers.{provider.name}.max_tokens or reduce the requested output"
+                )
+                if progress is not None:
+                    progress(
+                        ProgressEvent(
+                            phase=phase,
+                            kind="message",
+                            completed=completed_videos,
+                            total=len(videos),
+                            unit="video",
+                            detail=f"{label} response failed validation: {error}",
+                        )
+                    )
+                raise error
+
+            split_at = (len(batch) + 1) // 2
+            left_batch = batch[:split_at]
+            right_batch = batch[split_at:]
+            if progress is not None:
+                progress(
+                    ProgressEvent(
+                        phase=phase,
+                        kind="message",
+                        completed=completed_videos,
+                        total=len(videos),
+                        unit="video",
+                        detail=(
+                            f"{label} hit provider output limit; retrying {len(batch)} "
+                            f"videos as {len(left_batch)} + {len(right_batch)}"
+                        ),
+                    )
+                )
+
+            left_response = _request_annotation_batch(
+                provider, prompt, left_batch, progress, phase
+            )
+            note_response(f"{label}a")
+            left = validate_batch(f"{label}a", left_batch, left_response)
+
+            right_response = _request_annotation_batch(
+                provider, prompt, right_batch, progress, phase
+            )
+            note_response(f"{label}b")
+            right = validate_batch(f"{label}b", right_batch, right_response)
+
+            return AnnotationBatchResult(
+                annotations=left.annotations + right.annotations,
+                input_sha256=evidence_hash(batch),
+                usage=merge_usage(response.usage, left.usage, right.usage),
+                response_model=(
+                    left.response_model
+                    if left.response_model == right.response_model
+                    else response.model or left.response_model or right.response_model
+                ),
+            )
+
         try:
             value = parse_json_content(response, provider.name)
             annotations = validate_annotation_response(
@@ -492,17 +552,26 @@ def annotate(
                         completed=completed_videos,
                         total=len(videos),
                         unit="video",
-                        detail=f"batch {index + 1} response failed validation: {exc}",
+                        detail=f"{label} response failed validation: {exc}",
                     )
                 )
             raise
 
-        result = AnnotationBatchResult(
+        return AnnotationBatchResult(
             annotations=tuple(annotations),
             input_sha256=evidence_hash(batch),
             usage=response.usage,
             response_model=response.model,
         )
+
+    def consume(
+        index: int,
+        batch: list[ClassificationEvidence],
+        response: ChatResponse,
+    ) -> AnnotationBatchResult:
+        nonlocal completed_videos, completed_batches
+        result = validate_batch(f"batch {index + 1}", batch, response)
+
         completed_videos += len(result.annotations)
         completed_batches += 1
         if progress is not None:
