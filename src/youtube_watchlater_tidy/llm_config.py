@@ -43,6 +43,7 @@ class ProviderConfig:
     retries: int = 2
     temperature: float = 0.0
     max_tokens: int = DEFAULT_MAX_TOKENS
+    stream: bool = False
     structured_mode: str = "json_object"
     extra: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
@@ -162,6 +163,7 @@ def _provider(name: str, raw: dict[str, Any]) -> ProviderConfig:
         retries=int(raw.get("retries", 2)),
         temperature=float(raw.get("temperature", 0.0)),
         max_tokens=int(raw.get("max_tokens", DEFAULT_MAX_TOKENS)),
+        stream=bool(raw.get("stream", preset == "openrouter")),
         structured_mode=structured_mode,
         extra=dict(extra),
         headers=headers,
