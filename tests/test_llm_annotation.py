@@ -22,13 +22,19 @@ from youtube_watchlater_tidy.llm_annotation import (
 )
 from youtube_watchlater_tidy.llm_annotation_store import (
     annotation_cache_key,
+    annotation_completed_batch_indexes,
     annotation_run_payload,
+    begin_annotation_run,
     cached_annotation_run_id,
+    complete_annotation_run,
+    incomplete_annotation_run_id,
+    store_annotation_batch,
     store_annotation_run,
 )
 from youtube_watchlater_tidy.llm_classification import (
     ClassificationEvidence,
     classification_evidence,
+    evidence_hash,
 )
 from youtube_watchlater_tidy.llm_config import ProviderConfig, load_project_config
 from youtube_watchlater_tidy.llm_provider import ChatResponse
@@ -533,6 +539,251 @@ Telecoms = "Telephony, radio, networking and modems."
         self.assertEqual(payload["taxonomy_source"], "configured")
         self.assertEqual(payload["annotations"][0]["primary_category"], "Retrocomputing")
         self.assertEqual(payload["context"]["scope"], "all")
+
+    def test_annotation_batches_are_checkpointed_before_run_completion(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=2,
+            )
+            run_id = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=self.provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"scope": "all", "batch_size": 1},
+            )
+            first = AnnotationBatchResult(
+                annotations=(self._annotation(videos[0].video_id),),
+                input_sha256=evidence_hash([videos[0]]),
+                usage={"prompt_tokens": 10},
+                response_model="model-a",
+            )
+            store_annotation_batch(
+                conn,
+                run_id=run_id,
+                batch_index=0,
+                videos=[videos[0]],
+                result=first,
+            )
+
+            payload = annotation_run_payload(conn, run_id)
+            provider_sha, input_sha, _ = annotation_cache_key(
+                self.provider,
+                self.prompt,
+                videos,
+            )
+            resumable = incomplete_annotation_run_id(
+                conn,
+                snapshot_id=self.snapshot,
+                provider_sha256=provider_sha,
+                prompt_sha256=self.prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=1,
+            )
+
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["video_count"], 2)
+            self.assertEqual(len(payload["annotations"]), 1)
+            self.assertEqual(annotation_completed_batch_indexes(conn, run_id), {0})
+            self.assertEqual(resumable, run_id)
+            self.assertIsNone(
+                cached_annotation_run_id(
+                    conn,
+                    snapshot_id=self.snapshot,
+                    provider_sha256=provider_sha,
+                    prompt_sha256=self.prompt.sha256,
+                    input_sha256=input_sha,
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "1/2 annotations"):
+                complete_annotation_run(conn, run_id)
+
+            second = AnnotationBatchResult(
+                annotations=(self._annotation(videos[1].video_id, "Telecoms"),),
+                input_sha256=evidence_hash([videos[1]]),
+                usage={"prompt_tokens": 11},
+                response_model="model-a",
+            )
+            store_annotation_batch(
+                conn,
+                run_id=run_id,
+                batch_index=1,
+                videos=[videos[1]],
+                result=second,
+            )
+            complete_annotation_run(conn, run_id)
+            payload = annotation_run_payload(conn, run_id)
+
+        self.assertEqual(payload["status"], "complete")
+        self.assertEqual(len(payload["annotations"]), 2)
+
+    def test_annotation_resume_skips_checkpointed_batches(self) -> None:
+        videos = [
+            ClassificationEvidence(
+                video_id="video00000A",
+                playlist_position=1,
+                original_title="A",
+                recovered_title=None,
+                recovered_source=None,
+                dearrow_title=None,
+                channel="One",
+                channel_id="UCONE",
+                duration=1,
+                view_count=2,
+                upload_date=None,
+                availability=None,
+            ),
+            ClassificationEvidence(
+                video_id="video00000E",
+                playlist_position=2,
+                original_title="B",
+                recovered_title=None,
+                recovered_source=None,
+                dearrow_title=None,
+                channel="Two",
+                channel_id="UCTWO",
+                duration=3,
+                view_count=4,
+                upload_date=None,
+                availability=None,
+            ),
+        ]
+        requested: list[str] = []
+        checkpointed: list[int] = []
+
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
+            batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
+            requested.extend(row["video_id"] for row in batch)
+            video_id = batch[0]["video_id"]
+            return ChatResponse(
+                content=json.dumps(
+                    {
+                        "annotations": [
+                            {
+                                "video_id": video_id,
+                                "primary_category": "Telecoms",
+                                "subject": "subject",
+                                "tags": ["telecoms"],
+                                "content_type": "technical",
+                                "confidence": 0.8,
+                            }
+                        ]
+                    }
+                ),
+                usage={},
+                model="model-a",
+                raw={},
+                finish_reason="stop",
+            )
+
+        events = []
+        with patch("youtube_watchlater_tidy.llm_annotation.chat", side_effect=fake_chat):
+            result = annotate(
+                self.provider,
+                self.prompt,
+                videos,
+                batch_size=1,
+                completed_batch_indexes={0},
+                on_batch=lambda index, batch, batch_result: checkpointed.append(index),
+                progress=events.append,
+            )
+
+        self.assertEqual(requested, ["video00000E"])
+        self.assertEqual(checkpointed, [1])
+        self.assertEqual([item.video_id for item in result.annotations], ["video00000E"])
+        self.assertEqual(events[0].completed, 1)
+        self.assertEqual(events[-1].completed, 2)
+
+    def test_failed_later_response_preserves_earlier_checkpoint(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=True,
+                limit=2,
+            )
+            provider = ProviderConfig(
+                name="test",
+                preset="generic",
+                base_url="https://example.invalid/v1",
+                model="model-a",
+                concurrency=1,
+            )
+            run_id = begin_annotation_run(
+                conn,
+                snapshot_id=self.snapshot,
+                provider=provider,
+                prompt=self.prompt,
+                videos=videos,
+                taxonomy_source="configured",
+                context={"scope": "all", "batch_size": 1},
+            )
+            calls = 0
+
+            def fake_chat(provider, messages, json_schema=None, **kwargs):
+                nonlocal calls
+                calls += 1
+                batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
+                if calls == 2:
+                    return ChatResponse(
+                        content="not json",
+                        usage={},
+                        model="model-a",
+                        raw={},
+                        finish_reason="stop",
+                    )
+                video_id = batch[0]["video_id"]
+                return ChatResponse(
+                    content=json.dumps(
+                        {
+                            "annotations": [
+                                {
+                                    "video_id": video_id,
+                                    "primary_category": "Retrocomputing",
+                                    "subject": "subject",
+                                    "tags": ["retrocomputing"],
+                                    "content_type": "technical",
+                                    "confidence": 0.8,
+                                }
+                            ]
+                        }
+                    ),
+                    usage={},
+                    model="model-a",
+                    raw={},
+                    finish_reason="stop",
+                )
+
+            def checkpoint(index, batch, batch_result):
+                store_annotation_batch(
+                    conn,
+                    run_id=run_id,
+                    batch_index=index,
+                    videos=batch,
+                    result=batch_result,
+                )
+
+            with patch("youtube_watchlater_tidy.llm_annotation.chat", side_effect=fake_chat):
+                with self.assertRaisesRegex(RuntimeError, "non-JSON"):
+                    annotate(
+                        provider,
+                        self.prompt,
+                        videos,
+                        batch_size=1,
+                        on_batch=checkpoint,
+                    )
+
+            payload = annotation_run_payload(conn, run_id)
+
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(len(payload["annotations"]), 1)
+        self.assertEqual(payload["annotations"][0]["video_id"], videos[0].video_id)
 
     def test_schema_v7_migrates_annotation_tables(self) -> None:
         path = self.root / "v7.sqlite3"
