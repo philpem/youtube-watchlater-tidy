@@ -213,6 +213,9 @@ def store_annotation_batch(
     annotation_ids = {annotation.video_id for annotation in result.annotations}
     if annotation_ids != set(evidence_by_id):
         raise ValueError("cannot checkpoint annotation batch: annotation/video IDs mismatch")
+    expected_input_sha = evidence_hash(videos)
+    if result.input_sha256 != expected_input_sha:
+        raise ValueError("cannot checkpoint annotation batch: input hash mismatch")
 
     with conn:
         existing = conn.execute(
@@ -413,6 +416,8 @@ def annotation_run_payload(conn: sqlite3.Connection, run_id: int) -> dict[str, A
         "taxonomy_source": run["taxonomy_source"],
         "taxonomy": json.loads(run["taxonomy_json"]),
         "video_count": int(run["video_count"]),
+        "stored_video_count": len(annotations),
+        "batch_count": len(batches),
         "context": context,
         "batches": [
             {
