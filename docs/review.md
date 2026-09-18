@@ -45,17 +45,34 @@ It displays, where available:
 - channel identity;
 - duration, views, upload date and availability;
 - the current human/rule decision;
-- the latest stored LLM suggestion and its provenance.
+- the latest stored semantic category/subject/tags, when available;
+- the latest stored LLM action suggestion and its provenance.
 
 Current decisions and LLM suggestions are deliberately separate. An LLM suggestion is never shown as though it were already the current decision.
 
 Recovered-video links are taken only from archive resources whose recovery metadata explicitly says they contain video. Metadata-only sources are not presented as playable recovered video links. If several archives contain the video, the report shows all matching services.
 
-## Filter and sort
+## Filter, semantic facets and sort
 
-The page supports free-text search, current-action filtering, LLM-action filtering, topic filtering, maximum LLM confidence, and position/confidence/view sorting. Large result sets are paginated in the browser; the default is 100 rows per page and the page-size selector offers 50, 100, 250, or 500 rows.
+The page supports free-text search, current-action filtering, LLM-action filtering, legacy
+topic filtering, maximum LLM confidence, and position/confidence/view sorting. Large result
+sets are paginated in the browser; the default is 100 rows per page and the page-size
+selector offers 50, 100, 250, or 500 rows.
 
-Filtering and sorting apply to the complete report before pagination, and human overrides are retained while moving between pages. The confidence filter is useful for focusing on uncertain LLM results.
+When semantic annotations have been generated with `watchlater-llm annotate`, the report
+also shows **Categories** and **Top tags** counts above the table. The largest counts make
+large cohorts visible immediately. Their population follows the ordinary search/current
+decision/LLM filters, so selecting `Current = unresolved` answers questions such as
+"what dominates the work I still have to review?"
+
+Category and tag counts are clickable. Multiple categories are ORed together, multiple tags
+are ORed together, and the category facet is ANDed with the tag facet. Category/tag chips
+inside each video row use the same filters. **Clear semantic filters** resets both sets.
+
+Filtering and sorting apply to the complete report before pagination, and human overrides
+are retained while moving between pages. Free-text search includes category, subject,
+content type and tags. The confidence filter remains the action-classifier confidence
+filter and is useful for focusing on uncertain LLM suggestions.
 
 ## Human overrides
 
