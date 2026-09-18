@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -518,6 +518,37 @@ CREATE INDEX IF NOT EXISTS idx_llm_taxonomies_fingerprint
 """
 
 
+MIGRATION_9_TO_10 = """
+ALTER TABLE llm_annotation_batches ADD COLUMN provider_name TEXT;
+ALTER TABLE llm_annotation_batches ADD COLUMN provider_preset TEXT;
+ALTER TABLE llm_annotation_batches ADD COLUMN requested_model TEXT;
+ALTER TABLE llm_annotation_batches ADD COLUMN provider_sha256 TEXT;
+ALTER TABLE llm_annotation_batches ADD COLUMN provider_config_json TEXT;
+
+UPDATE llm_annotation_batches
+SET provider_name = (
+        SELECT r.provider_name FROM llm_annotation_runs AS r
+        WHERE r.id = llm_annotation_batches.run_id
+    ),
+    provider_preset = (
+        SELECT r.provider_preset FROM llm_annotation_runs AS r
+        WHERE r.id = llm_annotation_batches.run_id
+    ),
+    requested_model = (
+        SELECT r.requested_model FROM llm_annotation_runs AS r
+        WHERE r.id = llm_annotation_batches.run_id
+    ),
+    provider_sha256 = (
+        SELECT r.provider_sha256 FROM llm_annotation_runs AS r
+        WHERE r.id = llm_annotation_batches.run_id
+    ),
+    provider_config_json = (
+        SELECT r.provider_config_json FROM llm_annotation_runs AS r
+        WHERE r.id = llm_annotation_batches.run_id
+    );
+"""
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
     if db_path.parent != Path(""):
@@ -553,6 +584,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
+            conn.executescript(MIGRATION_9_TO_10)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
 
@@ -566,7 +598,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 2:
@@ -578,7 +611,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 3:
@@ -589,7 +623,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 4:
@@ -599,7 +634,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 5:
@@ -608,7 +644,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 6:
@@ -616,20 +653,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 7:
         with conn:
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 8:
         with conn:
             conn.executescript(MIGRATION_8_TO_9)
-            conn.execute("PRAGMA user_version = 9")
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
+        return
+
+    if version == 9:
+        with conn:
+            conn.executescript(MIGRATION_9_TO_10)
+            conn.execute("PRAGMA user_version = 10")
         return
 
     if version != SCHEMA_VERSION:
