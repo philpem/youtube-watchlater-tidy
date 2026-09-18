@@ -27,6 +27,7 @@ PRESET_API_KEY_ENVS = {
 }
 
 STRUCTURED_MODES = {"json_object", "json_schema", "none"}
+DEFAULT_MAX_TOKENS = 6000
 RESERVED_HEADER_NAMES = {"authorization", "content-type", "accept", "user-agent"}
 
 
@@ -41,7 +42,7 @@ class ProviderConfig:
     concurrency: int = 2
     retries: int = 2
     temperature: float = 0.0
-    max_tokens: int = 1200
+    max_tokens: int = DEFAULT_MAX_TOKENS
     structured_mode: str = "json_object"
     extra: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
@@ -160,7 +161,7 @@ def _provider(name: str, raw: dict[str, Any]) -> ProviderConfig:
         concurrency=int(raw.get("concurrency", 2)),
         retries=int(raw.get("retries", 2)),
         temperature=float(raw.get("temperature", 0.0)),
-        max_tokens=int(raw.get("max_tokens", 1200)),
+        max_tokens=int(raw.get("max_tokens", DEFAULT_MAX_TOKENS)),
         structured_mode=structured_mode,
         extra=dict(extra),
         headers=headers,
