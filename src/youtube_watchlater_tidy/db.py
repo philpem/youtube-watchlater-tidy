@@ -549,6 +549,20 @@ SET provider_name = (
 """
 
 
+def _migrate_9_to_10(conn: sqlite3.Connection) -> None:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'llm_annotation_batches'"
+    ).fetchone()
+    if table is None:
+        return
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(llm_annotation_batches)")
+    }
+    if "provider_name" in columns:
+        return
+    conn.executescript(MIGRATION_9_TO_10)
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
     if db_path.parent != Path(""):
@@ -584,7 +598,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
 
@@ -598,7 +612,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
@@ -611,7 +625,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
@@ -623,7 +637,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
@@ -634,7 +648,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
@@ -644,7 +658,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
@@ -653,7 +667,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
@@ -661,20 +675,20 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(MIGRATION_7_TO_8)
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 8:
         with conn:
             conn.executescript(MIGRATION_8_TO_9)
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
     if version == 9:
         with conn:
-            conn.executescript(MIGRATION_9_TO_10)
+            _migrate_9_to_10(conn)
             conn.execute("PRAGMA user_version = 10")
         return
 
