@@ -28,6 +28,7 @@ structured_mode = "json_schema"
 preset = "openrouter"
 model = "anthropic/claude-sonnet-4.5"
 # api_key_env defaults to OPENROUTER_API_KEY for this preset.
+# stream defaults to true for OpenRouter so long generations show liveness.
 structured_mode = "json_object"
 
 [providers.openrouter.headers]
