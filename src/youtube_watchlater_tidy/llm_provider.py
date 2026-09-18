@@ -17,6 +17,7 @@ class ChatResponse:
     usage: dict[str, Any]
     model: str | None
     raw: dict[str, Any]
+    finish_reason: str | None = None
 
 
 FORBIDDEN_EXTRA_KEYS = {
@@ -110,6 +111,10 @@ def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatRespon
     if not isinstance(content, str):
         raise RuntimeError(f"provider {provider.name!r} response content is not text")
 
+    finish_reason = choices[0].get("finish_reason")
+    if not isinstance(finish_reason, str):
+        finish_reason = None
+
     usage = raw.get("usage")
     if not isinstance(usage, dict):
         usage = {}
@@ -119,6 +124,7 @@ def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatRespon
         usage=dict(usage),
         model=model if isinstance(model, str) else None,
         raw=raw,
+        finish_reason=finish_reason,
     )
 
 
@@ -189,8 +195,13 @@ def parse_json_content(response: ChatResponse, provider_name: str) -> dict[str, 
     try:
         value = json.loads(response.content)
     except json.JSONDecodeError as exc:
+        finish = (
+            f"; finish_reason={response.finish_reason!r}"
+            if response.finish_reason is not None
+            else ""
+        )
         raise RuntimeError(
-            f"provider {provider_name!r} returned non-JSON message content: {exc}"
+            f"provider {provider_name!r} returned non-JSON message content: {exc}{finish}"
         ) from exc
     if not isinstance(value, dict):
         raise RuntimeError(f"provider {provider_name!r} returned JSON that is not an object")

@@ -102,6 +102,7 @@ class ConsoleProgress:
         self.close()
 
     def close(self) -> None:
+        self.enabled = False
         self._heartbeat_stop.set()
         thread = self._heartbeat_thread
         if thread is not None and thread is not threading.current_thread():

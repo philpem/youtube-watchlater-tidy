@@ -774,6 +774,9 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_refine_description(args)
         if args.command == "results":
             return _cmd_results(args)
+    except KeyboardInterrupt:
+        print("watchlater-llm: interrupted", file=sys.stderr)
+        return 130
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"watchlater-llm: error: {exc}", file=sys.stderr)
         return 2
