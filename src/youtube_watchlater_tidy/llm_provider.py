@@ -91,6 +91,63 @@ def build_chat_request(
     return url, headers, json.dumps(body, ensure_ascii=False).encode("utf-8")
 
 
+def _message_text_content(
+    message: dict[str, Any],
+    *,
+    provider: ProviderConfig,
+    finish_reason: str | None,
+    response_model: str | None,
+) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        unsupported: list[str] = []
+        for index, part in enumerate(content):
+            if isinstance(part, str):
+                text_parts.append(part)
+                continue
+            if not isinstance(part, dict):
+                unsupported.append(f"{index}:{type(part).__name__}")
+                continue
+            part_type = part.get("type")
+            text = part.get("text")
+            if part_type in {"text", "output_text"} and isinstance(text, str):
+                text_parts.append(text)
+                continue
+            unsupported.append(f"{index}:{part_type or 'unknown'}")
+        if unsupported:
+            raise RuntimeError(
+                f"provider {provider.name!r} response contains unsupported content "
+                f"part(s): {', '.join(unsupported)}"
+            )
+        return "".join(text_parts)
+
+    # Some reasoning/provider implementations return no visible content when the
+    # completion exhausts its output budget. Preserve that finish reason so the
+    # caller can use its adaptive batch-splitting recovery.
+    if content is None and finish_reason == "length":
+        return ""
+
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal.strip():
+        raise RuntimeError(
+            f"provider {provider.name!r} refused the request: {refusal.strip()[:500]}"
+        )
+
+    model_detail = f"; model={response_model!r}" if response_model else ""
+    finish_detail = (
+        f"; finish_reason={finish_reason!r}" if finish_reason is not None else ""
+    )
+    keys = ", ".join(sorted(str(key) for key in message))
+    raise RuntimeError(
+        f"provider {provider.name!r} response has no supported text content"
+        f"{finish_detail}{model_detail}; message keys=[{keys}]"
+    )
+
+
 def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatResponse:
     try:
         raw = json.loads(payload)
@@ -107,9 +164,6 @@ def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatRespon
     message = choices[0].get("message")
     if not isinstance(message, dict):
         raise RuntimeError(f"provider {provider.name!r} response has no choices[0].message")
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise RuntimeError(f"provider {provider.name!r} response content is not text")
 
     finish_reason = choices[0].get("finish_reason")
     if not isinstance(finish_reason, str):
@@ -119,10 +173,17 @@ def _parse_chat_response(payload: bytes, provider: ProviderConfig) -> ChatRespon
     if not isinstance(usage, dict):
         usage = {}
     model = raw.get("model")
+    response_model = model if isinstance(model, str) else None
+    content = _message_text_content(
+        message,
+        provider=provider,
+        finish_reason=finish_reason,
+        response_model=response_model,
+    )
     return ChatResponse(
         content=content,
         usage=dict(usage),
-        model=model if isinstance(model, str) else None,
+        model=response_model,
         raw=raw,
         finish_reason=finish_reason,
     )
