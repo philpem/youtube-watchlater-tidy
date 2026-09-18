@@ -152,16 +152,14 @@ class PlaywrightWatchLaterClient:
     def _loaded_video_ids(self) -> list[str]:
         result: list[str] = []
         seen: set[str] = set()
-        rows = self._page.locator("ytd-playlist-video-renderer")
-        for index in range(rows.count()):
-            anchors = rows.nth(index).locator('a[href*="watch"]')
-            video_id = None
-            for anchor_index in range(anchors.count()):
-                video_id = _video_id_from_href(
-                    anchors.nth(anchor_index).get_attribute("href")
-                )
-                if video_id:
-                    break
+        hrefs = self._page.locator("ytd-playlist-video-renderer").evaluate_all(
+            """rows => rows.map((row) => {
+                const anchor = row.querySelector('a[href*="watch"]');
+                return anchor ? anchor.getAttribute("href") : null;
+            })"""
+        )
+        for href in hrefs:
+            video_id = _video_id_from_href(href)
             if video_id and video_id not in seen:
                 seen.add(video_id)
                 result.append(video_id)
@@ -217,6 +215,8 @@ class PlaywrightWatchLaterClient:
                     yield BrowserScanEvent("candidate", video_id=video_id)
                 stable = 0
                 last_content = None
+                if pending:
+                    self._scroll_to_bottom()
                 continue
 
             metrics = self._scroll_metrics()

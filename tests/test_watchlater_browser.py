@@ -102,6 +102,27 @@ class ScriptedScanClient(PlaywrightWatchLaterClient):
         self.scroll_calls += 1
 
 
+class BulkRowsLocator:
+    def __init__(self, hrefs: list[str | None]) -> None:
+        self.hrefs = hrefs
+        self.evaluate_all_calls = 0
+
+    def evaluate_all(self, script: str):
+        self.evaluate_all_calls += 1
+        self.script = script
+        return list(self.hrefs)
+
+
+class BulkRowsPage:
+    def __init__(self, locator: BulkRowsLocator) -> None:
+        self.rows = locator
+        self.selectors: list[str] = []
+
+    def locator(self, selector: str) -> BulkRowsLocator:
+        self.selectors.append(selector)
+        return self.rows
+
+
 class WatchLaterBrowserExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -272,7 +293,23 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
         self.assertEqual(result.not_found, 2)
         self.assertEqual(result.run_status, "partial")
 
-    def test_single_scan_yields_loaded_matches_before_scrolling(self) -> None:
+    def test_loaded_video_ids_use_one_bulk_dom_evaluation(self) -> None:
+        locator = BulkRowsLocator(
+            [
+                "/watch?v=video00000A&list=WL",
+                None,
+                "/watch?v=video00000B&list=WL",
+                "/watch?v=video00000A&list=WL",
+            ]
+        )
+        client = object.__new__(PlaywrightWatchLaterClient)
+        client._page = BulkRowsPage(locator)
+
+        self.assertEqual(client._loaded_video_ids(), ["video00000A", "video00000B"])
+        self.assertEqual(locator.evaluate_all_calls, 1)
+        self.assertEqual(locator.script.count("querySelector"), 1)
+
+    def test_single_scan_yields_loaded_matches_and_advances_after_batch(self) -> None:
         client = ScriptedScanClient(
             [["video00000A", "other000001"], ["video00000B", "other000001"]],
             [_ScrollMetrics(0, 100, 1000)],
@@ -288,7 +325,7 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
                 ("finished", None),
             ],
         )
-        self.assertEqual(client.scroll_calls, 0)
+        self.assertEqual(client.scroll_calls, 1)
 
     def test_stable_end_ignores_dynamic_document_height(self) -> None:
         client = ScriptedScanClient(
