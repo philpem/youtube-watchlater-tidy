@@ -899,6 +899,10 @@ def _cmd_retry_content_filtered(args: argparse.Namespace) -> int:
                 provider_sha256=provider_sha,
                 prompt_sha256=prompt.sha256,
                 input_sha256=input_sha,
+                required_context={
+                    "stage": "content_filter_retry",
+                    "source_run_id": target.source_run_id,
+                },
             )
             if cached is not None:
                 output = annotation_run_payload(conn, cached)
@@ -915,6 +919,10 @@ def _cmd_retry_content_filtered(args: argparse.Namespace) -> int:
                 input_sha256=input_sha,
                 videos=videos,
                 batch_size=args.batch_size,
+                required_context={
+                    "stage": "content_filter_retry",
+                    "source_run_id": target.source_run_id,
+                },
             )
             if partial is not None:
                 run_id = partial
