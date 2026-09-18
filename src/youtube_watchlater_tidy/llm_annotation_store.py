@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from .llm_annotation import AnnotationBatchResult, AnnotationPrompt, AnnotationRunResult
-from .llm_classification import evidence_hash
+from .llm_classification import ClassificationEvidence, evidence_hash
 from .llm_config import ProviderConfig
 from .llm_store import evidence_item_hash, provider_fingerprint
 from .reports import latest_snapshot_id
@@ -23,6 +24,73 @@ def _canonical_hash(value: Any) -> str:
             "utf-8"
         )
     ).hexdigest()
+
+
+@dataclass(frozen=True)
+class ContentFilteredRetryTarget:
+    source_run_id: int
+    snapshot_id: int
+    selection_id: int | None
+    taxonomy_source: str
+    taxonomy: dict[str, str]
+    interest_profile: str | None
+    videos: tuple[ClassificationEvidence, ...]
+
+
+def content_filtered_retry_target(
+    conn: sqlite3.Connection,
+    run_id: int,
+) -> ContentFilteredRetryTarget:
+    run = conn.execute(
+        """
+        SELECT id, snapshot_id, selection_id, taxonomy_source, taxonomy_json,
+               interest_profile
+        FROM llm_annotation_runs
+        WHERE id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    if run is None:
+        raise ValueError(f"LLM annotation run {run_id} does not exist")
+
+    rows = conn.execute(
+        """
+        SELECT evidence_json, tags_json
+        FROM llm_annotations
+        WHERE run_id = ?
+        ORDER BY playlist_position, id
+        """,
+        (run_id,),
+    ).fetchall()
+    videos: list[ClassificationEvidence] = []
+    for row in rows:
+        tags = json.loads(row["tags_json"])
+        if not isinstance(tags, list) or "content-filtered" not in tags:
+            continue
+        evidence = json.loads(row["evidence_json"])
+        if not isinstance(evidence, dict):
+            raise ValueError(
+                f"LLM annotation run {run_id} contains invalid stored evidence"
+            )
+        try:
+            videos.append(ClassificationEvidence(**evidence))
+        except TypeError as exc:
+            raise ValueError(
+                f"LLM annotation run {run_id} contains incompatible stored evidence"
+            ) from exc
+
+    taxonomy = json.loads(run["taxonomy_json"])
+    if not isinstance(taxonomy, dict):
+        raise ValueError(f"LLM annotation run {run_id} contains invalid taxonomy")
+    return ContentFilteredRetryTarget(
+        source_run_id=run_id,
+        snapshot_id=int(run["snapshot_id"]),
+        selection_id=run["selection_id"],
+        taxonomy_source=str(run["taxonomy_source"]),
+        taxonomy={str(key): str(value) for key, value in taxonomy.items()},
+        interest_profile=run["interest_profile"],
+        videos=tuple(videos),
+    )
 
 
 def annotation_cache_key(
