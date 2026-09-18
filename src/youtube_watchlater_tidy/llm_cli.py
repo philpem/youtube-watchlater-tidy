@@ -847,6 +847,182 @@ def _cmd_classify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_retry_content_filtered(args: argparse.Namespace) -> int:
+    if args.refresh and args.no_store:
+        raise ValueError("--refresh is meaningless with --no-store")
+    if args.batch_size < 1:
+        raise ValueError("--batch-size must be at least 1")
+
+    config = load_project_config(args.config)
+    provider = config.provider(args.provider)
+    if args.model:
+        provider = replace(provider, model=args.model)
+
+    with open_catalogue(args.db) as conn:
+        target = content_filtered_retry_target(conn, args.run_id)
+        videos = list(target.videos)
+
+    if not videos:
+        print(f"Annotation run {args.run_id} has no content-filtered videos to retry.")
+        return 0
+
+    interest_profile = (
+        args.interest_profile
+        if args.interest_profile is not None
+        else target.interest_profile
+    )
+    prompt = render_annotation_prompt(
+        config,
+        target.taxonomy,
+        interest_profile=interest_profile,
+        prompt_file=args.prompt_file,
+    )
+    provider_sha, input_sha, cache_key = annotation_cache_key(
+        provider, prompt, videos
+    )
+    context = {
+        "stage": "content_filter_retry",
+        "source_run_id": target.source_run_id,
+        "batch_size": args.batch_size,
+        "model_override": args.model,
+    }
+
+    run_id: int | None = None
+    completed_batch_indexes: set[int] = set()
+    resumed = False
+
+    with open_catalogue(args.db) as conn:
+        if not args.dry_run and not args.no_store and not args.refresh:
+            cached = cached_annotation_run_id(
+                conn,
+                snapshot_id=target.snapshot_id,
+                provider_sha256=provider_sha,
+                prompt_sha256=prompt.sha256,
+                input_sha256=input_sha,
+            )
+            if cached is not None:
+                output = annotation_run_payload(conn, cached)
+                output["cache"] = "hit"
+                output["source_run_id"] = target.source_run_id
+                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                return 0
+
+            partial = incomplete_annotation_run_id(
+                conn,
+                snapshot_id=target.snapshot_id,
+                requested_model=provider.model,
+                prompt_sha256=prompt.sha256,
+                input_sha256=input_sha,
+                videos=videos,
+                batch_size=args.batch_size,
+            )
+            if partial is not None:
+                run_id = partial
+                completed_batch_indexes = annotation_completed_batch_indexes(conn, run_id)
+                resumed = True
+                completed_videos = sum(
+                    len(videos[index * args.batch_size : (index + 1) * args.batch_size])
+                    for index in completed_batch_indexes
+                )
+                print(
+                    f"Resuming content-filter retry run {run_id}: "
+                    f"{completed_videos}/{len(videos)} video(s) already checkpointed",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        if args.dry_run:
+            output = {
+                "stage": "content_filter_retry",
+                "dry_run": True,
+                "source_run_id": target.source_run_id,
+                "snapshot_id": target.snapshot_id,
+                "selection_id": target.selection_id,
+                "provider": provider.name,
+                "model": provider.model,
+                "provider_sha256": provider_sha,
+                "prompt_sha256": prompt.sha256,
+                "input_sha256": input_sha,
+                "cache_key": cache_key,
+                "taxonomy_source": target.taxonomy_source,
+                "taxonomy": target.taxonomy,
+                "video_count": len(videos),
+                "videos": [video.as_payload() for video in videos],
+            }
+            print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if not args.no_store and run_id is None:
+            run_id = begin_annotation_run(
+                conn,
+                snapshot_id=target.snapshot_id,
+                selection_id=target.selection_id,
+                provider=provider,
+                prompt=prompt,
+                videos=videos,
+                taxonomy_source=target.taxonomy_source,
+                context=context,
+            )
+            print(
+                f"Started content-filter retry run {run_id} from annotation run "
+                f"{target.source_run_id} for {len(videos)} video(s)",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    if args.no_store:
+        with ConsoleProgress(selected_progress_mode(args)) as progress:
+            result = annotate(
+                provider,
+                prompt,
+                videos,
+                batch_size=args.batch_size,
+                progress=progress,
+                phase="LLM content-filter retry",
+            )
+        output = _annotation_ephemeral_payload(
+            provider,
+            prompt,
+            videos,
+            result,
+            target.taxonomy_source,
+            context,
+        )
+        output["source_run_id"] = target.source_run_id
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    assert run_id is not None
+    with open_catalogue(args.db) as checkpoint_conn:
+        def checkpoint_batch(index, batch, batch_result) -> None:
+            store_annotation_batch(
+                checkpoint_conn,
+                run_id=run_id,
+                batch_index=index,
+                videos=batch,
+                result=batch_result,
+            )
+
+        with ConsoleProgress(selected_progress_mode(args)) as progress:
+            annotate(
+                provider,
+                prompt,
+                videos,
+                batch_size=args.batch_size,
+                progress=progress,
+                phase="LLM content-filter retry",
+                completed_batch_indexes=completed_batch_indexes,
+                on_batch=checkpoint_batch,
+            )
+        complete_annotation_run(checkpoint_conn, run_id)
+        output = annotation_run_payload(checkpoint_conn, run_id)
+
+    output["cache"] = "resume" if resumed else "refresh" if args.refresh else "miss"
+    output["source_run_id"] = target.source_run_id
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def _cmd_refine_description(args: argparse.Namespace) -> int:
     if args.refresh and args.no_store:
         raise ValueError("--refresh is meaningless with --no-store")
@@ -1005,6 +1181,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_taxonomy(args)
             if args.command == "annotation-results":
                 return _cmd_annotation_results(args)
+            if args.command == "retry-content-filtered":
+                return _cmd_retry_content_filtered(args)
             if args.command == "refine-description":
                 return _cmd_refine_description(args)
             if args.command == "results":
