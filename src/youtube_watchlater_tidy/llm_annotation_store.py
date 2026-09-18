@@ -146,6 +146,7 @@ def _provider_config_payload(
         "model": provider.model,
         "temperature": provider.temperature,
         "max_tokens": provider.max_tokens,
+        "stream": provider.stream,
         "structured_mode": provider.structured_mode,
         "extra": provider.extra,
         "annotation_context": context or {},
