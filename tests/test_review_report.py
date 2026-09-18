@@ -227,7 +227,7 @@ class ReviewReportTests(unittest.TestCase):
         self.assertIn("Recovered video:", page)
         self.assertIn("https://example.invalid/archive/video00000A", page)
         self.assertNotIn("https://example.invalid/metadata/video00000A", page)
-        self.assertIn(\'id="pageSize"\', page)
+        self.assertIn('id="pageSize"', page)
         self.assertIn("<option selected>100</option>", page)
         self.assertIn("visible.slice(start,start+pageSize)", page)
         self.assertIn("Page ${currentPage} / ${pageCount}", page)
