@@ -62,6 +62,10 @@ Changing/superseding the move decision replaces the destination set as a whole.
 
 ## Build a move plan
 
+This command is not needed for an `archive`/`delete`-only cleanup. In that case, skip
+destination inventory and playlist planning entirely and run `watchlater-remove plan`; see
+[Selective Watch Later removal](watchlater-removal.md#removal-only-workflow).
+
 Only current `move` decisions are included. LLM proposals remain advisory until a human/rule workflow creates a current decision.
 
 ```bash

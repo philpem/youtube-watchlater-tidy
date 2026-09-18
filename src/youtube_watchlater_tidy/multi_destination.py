@@ -221,13 +221,6 @@ def create_plan(
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
 
-    meta = conn.execute(
-        "SELECT * FROM youtube_playlist_inventory_meta WHERE singleton = 1"
-    ).fetchone()
-    if meta is None:
-        raise ValueError(
-            "no playlist inventory has been imported; import/refresh destination playlists before planning"
-        )
     if snapshot_id is None:
         snapshot_id = latest_snapshot_id(conn)
     if conn.execute("SELECT 1 FROM snapshots WHERE id = ?", (snapshot_id,)).fetchone() is None:
@@ -247,6 +240,22 @@ def create_plan(
         """,
         (snapshot_id,),
     ).fetchall()
+    if not decisions:
+        raise ValueError(
+            "snapshot has no current move decisions; watchlater-playlist only plans destination "
+            "moves. For archive/delete removal without destination playlists, run "
+            "'watchlater-remove plan' instead"
+        )
+
+    meta = conn.execute(
+        "SELECT * FROM youtube_playlist_inventory_meta WHERE singleton = 1"
+    ).fetchone()
+    if meta is None:
+        raise ValueError(
+            "no playlist inventory has been imported; import/refresh destination playlists before "
+            "planning moves. For archive/delete removal without destination playlists, run "
+            "'watchlater-remove plan' instead"
+        )
 
     destination_info: dict[str, dict[str, object]] = {}
     for row in decisions:

@@ -62,6 +62,9 @@ HTML review changes the local catalogue only after its exported JSON is imported
 
 ## Destination playlists
 
+This command family is only for `move` decisions. An `archive`/`delete`-only cleanup starts
+with `watchlater-remove plan` and does not require destination inventory.
+
 ```text
 watchlater-playlist inventory import    import a versioned inventory JSON file
 watchlater-playlist inventory show      show the current local inventory
@@ -78,6 +81,10 @@ plan ID supplied to `show --run-id` and `execute --run-id`. Omitting `--run-id` 
 latest suitable plan, but explicit IDs are clearer and safer.
 
 ## Watch Later removal
+
+Use this command family directly for removal-only workflows. `archive` and `delete`
+decisions do not need a preceding playlist plan or destination inventory; `move` decisions
+remain blocked until their destination checkpoints are confirmed.
 
 ```text
 watchlater-remove plan      persist a removal plan from current local decisions
@@ -102,4 +109,3 @@ Examples use these placeholders:
 | `REMOVAL_PLAN_ID` | Top-level `run_id` printed by `watchlater-remove plan` |
 | `VIDEO_ID` | Exact 11-character YouTube video ID |
 | `CHANNEL_ID` | Stable YouTube channel ID shown by creator reports |
-

@@ -9,6 +9,12 @@ The planner never changes YouTube. Browser execution is dry-run by default and r
 
 ## Build a removal plan
 
+### Removal-only workflow
+
+If every video you intend to remove has an `archive` or `delete` decision, no normal
+destination playlist and no playlist inventory are required. Start here, not with
+`watchlater-playlist plan`:
+
 ```bash
 watchlater-remove plan
 ```

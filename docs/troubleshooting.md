@@ -88,6 +88,21 @@ watchlater-remove plan
 If playlist planning prints `"run_id": 7`, use `--run-id 7`. The optional `--output` file
 is only a copy for inspection. `show` without an ID displays the latest applicable plan.
 
+## Playlist planning says no inventory was imported
+
+`watchlater-playlist plan` is only for `move` decisions: it plans additions to normal
+destination playlists, so those playlists must first be refreshed or imported.
+
+If you only marked videos `archive` or `delete`, you do not need an inventory. Use the
+separate removal workflow:
+
+```bash
+watchlater-remove plan
+watchlater-remove show
+```
+
+Then follow [Selective Watch Later removal](watchlater-removal.md) to dry-run and apply it.
+
 ## A plan is stale
 
 Plans bind every item to the exact current decision event. Changing an action or destination
@@ -147,4 +162,3 @@ watchlater-review import watchlater-review-SNAPSHOT_ID.json
 ```
 
 Regenerate the HTML report to verify the imported current decisions.
-
