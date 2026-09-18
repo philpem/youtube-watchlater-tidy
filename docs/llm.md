@@ -54,6 +54,52 @@ Paths in an interest profile are relative to the TOML file. Provider `extra` tab
 pass runtime-specific OpenAI-compatible request parameters, for example
 `reasoning_effort`, but reserved request fields cannot be overridden there.
 
+### Semantic review categories
+
+The action classifier's free-form topic is useful as evidence, but large-catalogue browsing
+works better with a vocabulary that is fixed across LLM batches. Configure broad categories
+under `[llm.review_categories]`:
+
+```toml
+[llm.review_categories]
+"Electronics" = "Electronics, test equipment, embedded systems and hardware engineering."
+"Retrocomputing" = "Historic computers, operating systems and unusual architectures."
+"Telecoms" = "Telephony, radio, networking, modems and communications."
+"Gaming" = "Games and game-related material."
+```
+
+The semantic annotator selects exactly one configured category and also emits a short
+subject, reusable lower-case tags, a content type and annotation confidence. `Other` and
+`Unclear` are reserved fallbacks added automatically.
+
+Annotate the whole snapshot even when some videos already have human/rule decisions:
+
+```bash
+watchlater-llm --config watchlater.toml annotate --scope all
+```
+
+Or annotate only the unresolved remainder:
+
+```bash
+watchlater-llm --config watchlater.toml annotate --scope remaining
+```
+
+A selection can be targeted with `--selection SELECTION_ID`. Semantic annotations are
+stored separately from action suggestions and never create or supersede a decision.
+
+If you do not want to maintain the broad vocabulary manually, an optional discovery pass
+can propose one from an evenly-spaced sample of catalogue metadata and then hold that
+vocabulary fixed for the actual annotation batches:
+
+```bash
+watchlater-llm --config watchlater.toml annotate \
+    --taxonomy discover --taxonomy-sample 250 --max-categories 20
+```
+
+Use `--dry-run` with configured categories to inspect the exact evidence, hashes and
+vocabulary without provider calls. With `--taxonomy discover --dry-run`, the command
+shows the discovery sample without calling the provider.
+
 Provider `headers` tables can supply safe non-protocol headers. This is useful for
 OpenRouter's optional attribution headers:
 

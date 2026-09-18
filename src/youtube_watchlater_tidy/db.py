@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -426,6 +426,72 @@ CREATE INDEX IF NOT EXISTS idx_llm_classifications_run
 """
 
 
+MIGRATION_7_TO_8 = """
+CREATE TABLE IF NOT EXISTS llm_annotation_runs (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    selection_id INTEGER REFERENCES selections(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('complete', 'error')),
+    provider_name TEXT NOT NULL,
+    provider_preset TEXT NOT NULL,
+    requested_model TEXT NOT NULL,
+    provider_sha256 TEXT NOT NULL,
+    prompt_sha256 TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    interest_profile TEXT,
+    taxonomy_source TEXT NOT NULL CHECK(taxonomy_source IN ('configured', 'discover')),
+    taxonomy_json TEXT NOT NULL,
+    video_count INTEGER NOT NULL,
+    provider_config_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_annotation_runs_cache
+    ON llm_annotation_runs(
+        snapshot_id, provider_sha256, prompt_sha256, input_sha256, status, id
+    );
+CREATE INDEX IF NOT EXISTS idx_llm_annotation_runs_snapshot
+    ON llm_annotation_runs(snapshot_id, id);
+
+CREATE TABLE IF NOT EXISTS llm_annotation_batches (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES llm_annotation_runs(id) ON DELETE CASCADE,
+    batch_index INTEGER NOT NULL,
+    input_sha256 TEXT NOT NULL,
+    response_model TEXT,
+    usage_json TEXT NOT NULL,
+    raw_response_json TEXT NOT NULL,
+    validated_json TEXT NOT NULL,
+    UNIQUE(run_id, batch_index)
+);
+
+CREATE TABLE IF NOT EXISTS llm_annotations (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES llm_annotation_runs(id) ON DELETE CASCADE,
+    batch_id INTEGER NOT NULL REFERENCES llm_annotation_batches(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL REFERENCES videos(video_id) ON DELETE CASCADE,
+    playlist_position INTEGER NOT NULL,
+    evidence_sha256 TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    primary_category TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    tags_json TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+    raw_result_json TEXT NOT NULL,
+    UNIQUE(run_id, video_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_annotations_video
+    ON llm_annotations(video_id, id);
+CREATE INDEX IF NOT EXISTS idx_llm_annotations_run
+    ON llm_annotations(run_id, playlist_position, id);
+CREATE INDEX IF NOT EXISTS idx_llm_annotations_category
+    ON llm_annotations(primary_category, video_id);
+"""
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
     if db_path.parent != Path(""):
@@ -459,6 +525,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(SCHEMA_SQL)
             conn.executescript(MIGRATION_6_TO_7)
+            conn.executescript(MIGRATION_7_TO_8)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
 
@@ -470,7 +537,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_4_TO_5)
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
-            conn.execute("PRAGMA user_version = 7")
+            conn.executescript(MIGRATION_7_TO_8)
+            conn.execute("PRAGMA user_version = 8")
         return
 
     if version == 2:
@@ -480,7 +548,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_4_TO_5)
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
-            conn.execute("PRAGMA user_version = 7")
+            conn.executescript(MIGRATION_7_TO_8)
+            conn.execute("PRAGMA user_version = 8")
         return
 
     if version == 3:
@@ -489,7 +558,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_4_TO_5)
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
-            conn.execute("PRAGMA user_version = 7")
+            conn.executescript(MIGRATION_7_TO_8)
+            conn.execute("PRAGMA user_version = 8")
         return
 
     if version == 4:
@@ -497,20 +567,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_4_TO_5)
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
-            conn.execute("PRAGMA user_version = 7")
+            conn.executescript(MIGRATION_7_TO_8)
+            conn.execute("PRAGMA user_version = 8")
         return
 
     if version == 5:
         with conn:
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
-            conn.execute("PRAGMA user_version = 7")
+            conn.executescript(MIGRATION_7_TO_8)
+            conn.execute("PRAGMA user_version = 8")
         return
 
     if version == 6:
         with conn:
             conn.executescript(MIGRATION_6_TO_7)
-            conn.execute("PRAGMA user_version = 7")
+            conn.executescript(MIGRATION_7_TO_8)
+            conn.execute("PRAGMA user_version = 8")
+        return
+
+    if version == 7:
+        with conn:
+            conn.executescript(MIGRATION_7_TO_8)
+            conn.execute("PRAGMA user_version = 8")
         return
 
     if version != SCHEMA_VERSION:

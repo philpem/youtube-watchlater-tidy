@@ -77,7 +77,13 @@ def review_rows(
                lc.destination_confidence AS llm_destination_confidence,
                lc.destination_reason AS llm_destination_reason,
                lc.needs_description AS llm_needs_description,
-               lc.needs_transcript AS llm_needs_transcript
+               lc.needs_transcript AS llm_needs_transcript,
+               la.run_id AS annotation_run_id,
+               la.primary_category AS annotation_primary_category,
+               la.subject AS annotation_subject,
+               la.tags_json AS annotation_tags_json,
+               la.content_type AS annotation_content_type,
+               la.confidence AS annotation_confidence
         FROM snapshot_entries AS e
         LEFT JOIN preferred_metadata AS m ON m.video_id = e.video_id
         LEFT JOIN archive_lookups AS a
@@ -100,6 +106,17 @@ def review_rows(
                 AND r2.snapshot_id = e.snapshot_id
                 AND r2.status = 'complete'
               ORDER BY c2.id DESC
+              LIMIT 1
+          )
+        LEFT JOIN llm_annotations AS la
+          ON la.id = (
+              SELECT a2.id
+              FROM llm_annotations AS a2
+              JOIN llm_annotation_runs AS ar2 ON ar2.id = a2.run_id
+              WHERE a2.video_id = e.video_id
+                AND ar2.snapshot_id = e.snapshot_id
+                AND ar2.status = 'complete'
+              ORDER BY a2.id DESC
               LIMIT 1
           )
         WHERE e.snapshot_id = ?
@@ -206,6 +223,23 @@ def review_rows(
                 "needs_transcript": bool(row["llm_needs_transcript"]),
             }
 
+        annotation = None
+        if row["annotation_run_id"] is not None:
+            try:
+                annotation_tags = json.loads(row["annotation_tags_json"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                annotation_tags = []
+            if not isinstance(annotation_tags, list):
+                annotation_tags = []
+            annotation = {
+                "run_id": int(row["annotation_run_id"]),
+                "primary_category": row["annotation_primary_category"],
+                "subject": row["annotation_subject"],
+                "tags": [str(tag) for tag in annotation_tags if isinstance(tag, str)],
+                "content_type": row["annotation_content_type"],
+                "confidence": row["annotation_confidence"],
+            }
+
         result.append(
             {
                 "position": int(row["position"]),
@@ -225,6 +259,7 @@ def review_rows(
                 "thumbnail": _thumbnail(row["thumbnails_json"]),
                 "current_decision": current,
                 "llm": llm,
+                "annotation": annotation,
             }
         )
     return snapshot_id, result
@@ -245,15 +280,23 @@ def render_review_html(snapshot_id: int, rows: list[dict[str, Any]]) -> str:
 <style>
 :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
 body {{ margin: 1rem; }}
-header {{ position: sticky; top: 0; background: Canvas; padding: .5rem 0; z-index: 2; }}
+header {{ background: Canvas; padding: .5rem 0; }}
 .controls {{ display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }}
 .pagination {{ display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .5rem 0; }}
 .pagination button:disabled {{ opacity: .5; }}
 input, select, button {{ font: inherit; padding: .35rem; }}
 #summary {{ margin: .5rem 0; font-size: .9rem; }}
+.facets {{ display: grid; gap: .55rem; margin: .7rem 0 1rem; padding: .65rem; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .4rem; }}
+.facet-row {{ display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }}
+.facet-label {{ min-width: 7rem; font-weight: 600; }}
+.facet-chip {{ border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); border-radius: 999px; background: Canvas; cursor: pointer; padding: .2rem .5rem; }}
+.facet-chip.active {{ font-weight: 700; outline: 2px solid color-mix(in srgb, CanvasText 45%, transparent); }}
+.semantic-category {{ font-weight: 700; margin-bottom: .15rem; }}
+.semantic-subject {{ margin-bottom: .25rem; }}
+.semantic-tags {{ display: flex; flex-wrap: wrap; gap: .25rem; margin-bottom: .4rem; }}
 table {{ border-collapse: collapse; width: 100%; font-size: .85rem; }}
 th, td {{ border-bottom: 1px solid color-mix(in srgb, CanvasText 25%, transparent); padding: .4rem; vertical-align: top; }}
-th {{ position: sticky; top: 5.8rem; background: Canvas; text-align: left; }}
+th {{ position: sticky; top: 0; z-index: 1; background: Canvas; text-align: left; }}
 .thumb {{ width: 120px; max-height: 80px; object-fit: contain; }}
 .title {{ min-width: 20rem; }}
 .reason {{ max-width: 28rem; white-space: normal; }}
@@ -284,15 +327,22 @@ footer {{ margin-top: 1rem; font-size: .8rem; opacity: .8; }}
 <button id="lastPage" type="button">Last »</button>
 </div>
 <div id="summary"></div>
+<section id="facets" class="facets">
+<div class="facet-row"><span class="facet-label">Categories</span><div id="categoryFacets" class="facet-row"></div></div>
+<div class="facet-row"><span class="facet-label">Top tags</span><div id="tagFacets" class="facet-row"></div></div>
+<div class="facet-row"><button id="clearSemanticFilters" type="button">Clear semantic filters</button><span id="semanticStatus" class="small"></span></div>
+</section>
 </header>
 <table>
-<thead><tr><th>Pos</th><th>Video</th><th>Title / metadata</th><th>Current decision</th><th>Latest LLM suggestion</th><th>Human override</th></tr></thead>
+<thead><tr><th>Pos</th><th>Video</th><th>Title / metadata</th><th>Current decision</th><th>Semantic annotation / LLM suggestion</th><th>Human override</th></tr></thead>
 <tbody id="rows"></tbody>
 </table>
 <footer>Exported overrides are imported later as append-only decisions with source <code>human-review-report</code>. This page does not write SQLite or YouTube directly.</footer>
 <script>
 const DATA={data};
 const state = new Map();
+const selectedCategories = new Set();
+const selectedTags = new Set();
 let currentPage = 1;
 const searchEl = document.getElementById('search');
 const currentFilterEl = document.getElementById('currentFilter');
@@ -308,6 +358,10 @@ const lastPageEl = document.getElementById('lastPage');
 const pageStatusEl = document.getElementById('pageStatus');
 const rowsEl = document.getElementById('rows');
 const summaryEl = document.getElementById('summary');
+const categoryFacetsEl = document.getElementById('categoryFacets');
+const tagFacetsEl = document.getElementById('tagFacets');
+const clearSemanticFiltersEl = document.getElementById('clearSemanticFilters');
+const semanticStatusEl = document.getElementById('semanticStatus');
 const exportButtonEl = document.getElementById('exportButton');
 const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));
 const dur=s=>s==null?'-':`${{Math.floor(s/60)}}:${{String(Math.round(s%60)).padStart(2,'0')}}`;
@@ -318,9 +372,16 @@ function populateTopics() {{
     const o=document.createElement('option'); o.value=t; o.textContent=t; topicFilterEl.append(o);
   }});
 }}
-function matches(r) {{
+function matchesBase(r) {{
   const q=searchEl.value.trim().toLowerCase();
-  if(q && ![r.video_id,r.original_title,r.recovered_title,r.dearrow_title,r.channel,...(r.recovered_video_links||[]).flatMap(x=>[x.service,x.title]),r.llm?.topic,r.llm?.reason].filter(Boolean).join(' ').toLowerCase().includes(q)) return false;
+  const annotation=r.annotation;
+  if(q && ![
+    r.video_id,r.original_title,r.recovered_title,r.dearrow_title,r.channel,
+    ...(r.recovered_video_links||[]).flatMap(x=>[x.service,x.title]),
+    r.llm?.topic,r.llm?.reason,
+    annotation?.primary_category,annotation?.subject,annotation?.content_type,
+    ...(annotation?.tags||[])
+  ].filter(Boolean).join(' ').toLowerCase().includes(q)) return false;
   const currentAction=r.current_decision?.action ?? 'unresolved';
   if(currentFilterEl.value && currentAction!==currentFilterEl.value) return false;
   const llmAction=r.llm?.action ?? 'none';
@@ -328,6 +389,46 @@ function matches(r) {{
   if(topicFilterEl.value && r.llm?.topic!==topicFilterEl.value) return false;
   if(confidenceEl.value!=='' && (confidence(r)==null || confidence(r)>Number(confidenceEl.value))) return false;
   return true;
+}}
+function matchesSemantic(r) {{
+  if(selectedCategories.size && !selectedCategories.has(r.annotation?.primary_category)) return false;
+  if(selectedTags.size && !(r.annotation?.tags||[]).some(tag=>selectedTags.has(tag))) return false;
+  return true;
+}}
+function matches(r) {{
+  return matchesBase(r) && matchesSemantic(r);
+}}
+function countValues(values) {{
+  const counts=new Map();
+  values.filter(Boolean).forEach(value=>counts.set(value,(counts.get(value)||0)+1));
+  return [...counts.entries()].sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]));
+}}
+function toggleFacet(set,value) {{
+  if(set.has(value)) set.delete(value); else set.add(value);
+  currentPage=1;
+  render();
+}}
+function bindFacetButtons(root) {{
+  root.querySelectorAll('.category-chip').forEach(button=>button.addEventListener('click',()=>toggleFacet(selectedCategories,button.dataset.category)));
+  root.querySelectorAll('.tag-chip').forEach(button=>button.addEventListener('click',()=>toggleFacet(selectedTags,button.dataset.tag)));
+}}
+function renderFacets() {{
+  const population=DATA.rows.filter(matchesBase);
+  const categories=countValues(population.map(r=>r.annotation?.primary_category));
+  const tags=countValues(population.flatMap(r=>r.annotation?.tags||[])).slice(0,30);
+  categoryFacetsEl.innerHTML=categories.length
+    ? categories.map(([name,count])=>'<button type="button" class="facet-chip category-chip '+(selectedCategories.has(name)?'active':'')+'" data-category="'+esc(name)+'">'+esc(name)+' <span class="small">'+count+'</span></button>').join('')
+    : '<span class="small">no semantic categories</span>';
+  tagFacetsEl.innerHTML=tags.length
+    ? tags.map(([tag,count])=>'<button type="button" class="facet-chip tag-chip '+(selectedTags.has(tag)?'active':'')+'" data-tag="'+esc(tag)+'">#'+esc(tag)+' <span class="small">'+count+'</span></button>').join('')
+    : '<span class="small">no semantic tags</span>';
+  bindFacetButtons(categoryFacetsEl);
+  bindFacetButtons(tagFacetsEl);
+  clearSemanticFiltersEl.disabled=selectedCategories.size===0 && selectedTags.size===0;
+  const parts=[];
+  if(selectedCategories.size) parts.push(selectedCategories.size+' categor'+(selectedCategories.size===1?'y':'ies')+' selected');
+  if(selectedTags.size) parts.push(selectedTags.size+' tag(s) selected');
+  semanticStatusEl.textContent=parts.join(' · ');
 }}
 function sorted(visible) {{
   const mode=sortEl.value;
@@ -339,9 +440,29 @@ function sorted(visible) {{
     return a.position-b.position;
   }});
 }}
+function semanticHtml(annotation) {{
+  if(!annotation) return '<div class="small">no semantic annotation</div>';
+  const category='<button type="button" class="facet-chip category-chip '+(selectedCategories.has(annotation.primary_category)?'active':'')+'" data-category="'+esc(annotation.primary_category)+'">'+esc(annotation.primary_category)+'</button>';
+  const tags=(annotation.tags||[]).map(tag=>'<button type="button" class="facet-chip tag-chip '+(selectedTags.has(tag)?'active':'')+'" data-tag="'+esc(tag)+'">#'+esc(tag)+'</button>').join('');
+  return '<div class="semantic-category">'+category+' · '+Math.round((annotation.confidence??0)*100)+'%</div>'
+    +'<div class="semantic-subject">'+esc(annotation.subject)+'</div>'
+    +'<div class="semantic-tags">'+tags+'</div>'
+    +'<div class="small">'+esc(annotation.content_type)+' · annotation run '+annotation.run_id+'</div>';
+}}
+function suggestionHtml(llm) {{
+  if(!llm) return '<div class="small">no stored LLM suggestion</div>';
+  const destination=llm.existing_playlist?' → '+esc(llm.existing_playlist):llm.new_queue_proposal?' → '+esc(llm.new_queue_proposal):'';
+  return '<div class="action">LLM suggestion: '+esc(llm.action)+' · '+Math.round((llm.confidence??0)*100)+'%</div>'
+    +'<div>'+esc(llm.topic)+' · '+esc(llm.content_type)+' · '+esc(llm.timeliness)+'</div>'
+    +'<div class="reason">'+esc(llm.reason)+'</div>'
+    +'<div class="small">classification run '+llm.run_id+destination
+    +(llm.needs_description?' · needs description':'')
+    +(llm.needs_transcript?' · needs transcript':'')+'</div>';
+}}
 function rowHtml(r) {{
   const current=r.current_decision;
   const llm=r.llm;
+  const annotation=r.annotation;
   const s=state.get(r.video_id) || {{action:'',note:''}};
   const thumb=r.thumbnail?`<a href="${{esc(r.url)}}" target="_blank"><img class="thumb" loading="lazy" referrerpolicy="no-referrer" src="${{esc(r.thumbnail)}}"></a>`:'';
   const recovered=r.recovered_title?`<div><b>Recovered:</b> ${{esc(r.recovered_title)}} <span class="small">(${{esc(r.metadata_source)}})</span></div>`:'';
@@ -349,10 +470,11 @@ function rowHtml(r) {{
   const recoveredVideo=recoveredVideos?`<div><b>Recovered video:</b> ${{recoveredVideos}}</div>`:'';
   const dearrow=r.dearrow_title?`<div><b>DeArrow:</b> ${{esc(r.dearrow_title)}}</div>`:'';
   const cur=current?`<div class="action">${{esc(current.action)}}${{current.destination_playlist?' → '+esc(current.destination_playlist):''}}</div><div class="small">${{esc(current.source)}}${{current.reason?' — '+esc(current.reason):''}}</div>`:'<span class="small">unresolved</span>';
-  const lm=llm?`<div class="action">${{esc(llm.action)}} · ${{Math.round((llm.confidence??0)*100)}}%</div><div>${{esc(llm.topic)}} · ${{esc(llm.content_type)}} · ${{esc(llm.timeliness)}}</div><div class="reason">${{esc(llm.reason)}}</div><div class="small">run ${{llm.run_id}}${{llm.existing_playlist?' → '+esc(llm.existing_playlist):llm.new_queue_proposal?' → '+esc(llm.new_queue_proposal):''}}${{llm.needs_description?' · needs description':''}}${{llm.needs_transcript?' · needs transcript':''}}</div>`:'<span class="small">no stored LLM suggestion</span>';
+  const lm=semanticHtml(annotation)+suggestionHtml(llm);
   return `<tr data-id="${{esc(r.video_id)}}"><td>${{r.position}}</td><td>${{thumb}}<div><a href="${{esc(r.url)}}" target="_blank">${{esc(r.video_id)}}</a></div></td><td class="title"><b>${{esc(r.original_title)}}</b>${{recovered}}${{recoveredVideo}}${{dearrow}}<div>${{esc(r.channel||'-')}}</div><div class="small">${{dur(r.duration)}} · ${{num(r.views)}} views · ${{esc(r.upload_date||'-')}} · ${{esc(r.availability||'-')}}</div></td><td>${{cur}}</td><td>${{lm}}</td><td><select class="override-action"><option value="">no override</option>${{['keep','review','archive','delete'].map(a=>`<option value="${{a}}" ${{s.action===a?'selected':''}}>${{a}}</option>`).join('')}}</select><br><input class="override-note" placeholder="optional note" value="${{esc(s.note)}}"></td></tr>`;
 }}
 function render() {{
+  renderFacets();
   const visible=sorted(DATA.rows.filter(matches));
   const pageSize=Number(pageSizeEl.value);
   const pageCount=Math.max(1,Math.ceil(visible.length/pageSize));
@@ -360,6 +482,7 @@ function render() {{
   const start=(currentPage-1)*pageSize;
   const pageRows=visible.slice(start,start+pageSize);
   rowsEl.innerHTML=pageRows.map(rowHtml).join('');
+  bindFacetButtons(rowsEl);
   rowsEl.querySelectorAll('tr').forEach(tr=>{{
     const id=tr.dataset.id;
     tr.querySelector('.override-action').addEventListener('change',e=>{{
@@ -395,6 +518,12 @@ function exportOverrides() {{
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }}
 [searchEl,currentFilterEl,llmFilterEl,topicFilterEl,confidenceEl,sortEl,pageSizeEl].forEach(el=>el.addEventListener('input',()=>{{currentPage=1; render();}}));
+clearSemanticFiltersEl.addEventListener('click',()=>{{
+  selectedCategories.clear();
+  selectedTags.clear();
+  currentPage=1;
+  render();
+}});
 firstPageEl.addEventListener('click',()=>{{currentPage=1; render();}});
 previousPageEl.addEventListener('click',()=>{{currentPage-=1; render();}});
 nextPageEl.addEventListener('click',()=>{{currentPage+=1; render();}});
