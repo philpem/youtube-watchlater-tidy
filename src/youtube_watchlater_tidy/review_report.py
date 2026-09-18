@@ -334,7 +334,7 @@ footer {{ margin-top: 1rem; font-size: .8rem; opacity: .8; }}
 </section>
 </header>
 <table>
-<thead><tr><th>Pos</th><th>Video</th><th>Title / metadata</th><th>Current decision</th><th>Latest LLM suggestion</th><th>Human override</th></tr></thead>
+<thead><tr><th>Pos</th><th>Video</th><th>Title / metadata</th><th>Current decision</th><th>Semantic annotation / LLM suggestion</th><th>Human override</th></tr></thead>
 <tbody id="rows"></tbody>
 </table>
 <footer>Exported overrides are imported later as append-only decisions with source <code>human-review-report</code>. This page does not write SQLite or YouTube directly.</footer>
