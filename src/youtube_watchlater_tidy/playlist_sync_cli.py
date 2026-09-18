@@ -11,6 +11,12 @@ from .multi_destination import create_plan, record_selection_move
 from .multi_destination_support import plan_payload
 from .playlist_browser import execute_browser_plan
 from .playlist_playwright import PlaywrightPlaylistClient
+from .progress import (
+    ConsoleProgress,
+    add_progress_argument,
+    progress_enabled,
+    selected_progress_mode,
+)
 from .playlist_sync import (
     DEFAULT_API_QUOTA_LIMIT,
     DEFAULT_PLAYLIST_CREATE_COST,
@@ -82,7 +88,12 @@ def _parser() -> argparse.ArgumentParser:
         help="refresh owned playlists/membership from the authenticated YouTube Data API",
     )
     _add_oauth_args(inventory_refresh)
-    inventory_refresh.add_argument("--no-progress", action="store_true")
+    add_progress_argument(inventory_refresh)
+    inventory_refresh.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="compatibility alias for --progress never",
+    )
 
     login = sub.add_parser(
         "browser-login",
@@ -154,6 +165,7 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("--interval", type=float, default=2.0)
     execute.add_argument("--retries", type=int, default=1)
     execute.add_argument("--backoff", type=float, default=2.0)
+    add_progress_argument(execute, include_no_progress=True)
     _add_oauth_args(execute)
     _add_browser_args(execute)
     return parser
@@ -166,7 +178,11 @@ def _cmd_inventory(args: argparse.Namespace) -> int:
             token_file=args.token,
         )
         with open_catalogue(args.db) as conn:
-            result = refresh_inventory(conn, client, show_progress=not args.no_progress)
+            result = refresh_inventory(
+                conn,
+                client,
+                show_progress=progress_enabled(selected_progress_mode(args)),
+            )
         print(
             f"Refreshed {result.playlists} playlist(s) / {result.items} item(s) "
             f"from {result.source}; inventory fetched_at={result.fetched_at}"
@@ -271,16 +287,18 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                         max_scrolls=args.max_scrolls,
                         scroll_pause=args.scroll_pause,
                     )
-                result = execute_browser_plan(
-                    conn,
-                    run_id,
-                    client=browser_client,
-                    apply=args.apply,
-                    max_writes=args.max_writes,
-                    interval=args.interval,
-                    retries=args.retries,
-                    backoff=args.backoff,
-                )
+                with ConsoleProgress(selected_progress_mode(args)) as progress:
+                    result = execute_browser_plan(
+                        conn,
+                        run_id,
+                        client=browser_client,
+                        apply=args.apply,
+                        max_writes=args.max_writes,
+                        interval=args.interval,
+                        retries=args.retries,
+                        backoff=args.backoff,
+                        progress=progress,
+                    )
             else:
                 client = None
                 if args.apply:
@@ -288,14 +306,16 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                         client_secrets=args.client_secrets,
                         token_file=args.token,
                     )
-                result = execute_api_plan(
-                    conn,
-                    run_id,
-                    client=client,
-                    apply=args.apply,
-                    allow_over_quota=args.allow_over_quota,
-                    max_writes=args.max_writes,
-                )
+                with ConsoleProgress(selected_progress_mode(args)) as progress:
+                    result = execute_api_plan(
+                        conn,
+                        run_id,
+                        client=client,
+                        apply=args.apply,
+                        allow_over_quota=args.allow_over_quota,
+                        max_writes=args.max_writes,
+                        progress=progress,
+                    )
             payload = plan_payload(conn, run_id)
 
         output = {

@@ -31,6 +31,12 @@ from .llm_refinement import (
     description_refinement_evidence,
     description_refinement_prompt,
 )
+from .progress import (
+    ConsoleProgress,
+    ProgressEvent,
+    add_progress_argument,
+    selected_progress_mode,
+)
 from .llm_store import (
     cached_run_id,
     classification_cache_key,
@@ -81,6 +87,7 @@ def _parser() -> argparse.ArgumentParser:
 
     probe = sub.add_parser("probe", help="make a small structured-output test request")
     probe.add_argument("--provider")
+    add_progress_argument(probe, include_no_progress=True)
 
     classify_parser = sub.add_parser(
         "classify",
@@ -108,6 +115,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the exact cheap evidence and hashes without making LLM requests",
     )
+    add_progress_argument(classify_parser, include_no_progress=True)
 
     annotate_parser = sub.add_parser(
         "annotate",
@@ -159,6 +167,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show annotation evidence/taxonomy inputs without making provider requests",
     )
+    add_progress_argument(annotate_parser, include_no_progress=True)
 
     annotation_results = sub.add_parser(
         "annotation-results",
@@ -198,6 +207,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show refinement evidence without making provider requests",
     )
+    add_progress_argument(refine_parser, include_no_progress=True)
 
     results_parser = sub.add_parser(
         "results",
@@ -241,20 +251,44 @@ def _cmd_prompt(args: argparse.Namespace) -> int:
 def _cmd_probe(args: argparse.Namespace) -> int:
     config = load_project_config(args.config)
     provider = config.provider(args.provider)
-    response = chat(
-        provider,
-        [
-            {
-                "role": "system",
-                "content": "Return only a JSON object matching the requested schema.",
-            },
-            {
-                "role": "user",
-                "content": '{"instruction":"Return an object with ok=true."}',
-            },
-        ],
-        json_schema=PROBE_SCHEMA,
-    )
+    phase = "LLM provider probe"
+    with ConsoleProgress(selected_progress_mode(args)) as progress:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="start",
+                completed=0,
+                total=1,
+                unit="request",
+                detail=f"{provider.name}/{provider.model}",
+            )
+        )
+        response = chat(
+            provider,
+            [
+                {
+                    "role": "system",
+                    "content": "Return only a JSON object matching the requested schema.",
+                },
+                {
+                    "role": "user",
+                    "content": '{"instruction":"Return an object with ok=true."}',
+                },
+            ],
+            json_schema=PROBE_SCHEMA,
+            progress=progress,
+            phase=phase,
+        )
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="finish",
+                completed=1,
+                total=1,
+                unit="request",
+                detail="complete",
+            )
+        )
     value = parse_json_content(response, provider.name)
     if value.get("ok") is not True:
         raise RuntimeError(
@@ -387,12 +421,14 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 )
                 return 0
             sample = even_sample(videos, args.taxonomy_sample)
-            discovery = discover_taxonomy(
-                provider,
-                sample,
-                interest_brief=base_prompt.interest_brief,
-                max_categories=args.max_categories,
-            )
+            with ConsoleProgress(selected_progress_mode(args)) as progress:
+                discovery = discover_taxonomy(
+                    provider,
+                    sample,
+                    interest_brief=base_prompt.interest_brief,
+                    max_categories=args.max_categories,
+                    progress=progress,
+                )
             categories = discovery.categories
             taxonomy_context["taxonomy_discovery"] = discovery.as_context()
             taxonomy_context["taxonomy_sample_count"] = len(sample)
@@ -444,7 +480,15 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
             print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
 
-    result = annotate(provider, prompt, videos, batch_size=args.batch_size)
+    with ConsoleProgress(selected_progress_mode(args)) as progress:
+        result = annotate(
+            provider,
+            prompt,
+            videos,
+            batch_size=args.batch_size,
+            progress=progress,
+            phase="LLM annotation",
+        )
     context = {
         "stage": "semantic_annotation",
         "scope": args.scope,
@@ -542,13 +586,16 @@ def _cmd_classify(args: argparse.Namespace) -> int:
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    result = classify(
-        provider,
-        prompt,
-        videos,
-        playlists=set(config.playlists),
-        batch_size=args.batch_size,
-    )
+    with ConsoleProgress(selected_progress_mode(args)) as progress:
+        result = classify(
+            provider,
+            prompt,
+            videos,
+            playlists=set(config.playlists),
+            batch_size=args.batch_size,
+            progress=progress,
+            phase="LLM classification",
+        )
 
     if args.no_store:
         print(
@@ -654,13 +701,16 @@ def _cmd_refine_description(args: argparse.Namespace) -> int:
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    result = classify(
-        provider,
-        prompt,
-        videos,
-        playlists=set(config.playlists),
-        batch_size=args.batch_size,
-    )
+    with ConsoleProgress(selected_progress_mode(args)) as progress:
+        result = classify(
+            provider,
+            prompt,
+            videos,
+            playlists=set(config.playlists),
+            batch_size=args.batch_size,
+            progress=progress,
+            phase="LLM description refinement",
+        )
 
     if args.no_store:
         output = _ephemeral_payload(provider, prompt, videos, result)

@@ -10,6 +10,7 @@ from typing import Callable, Protocol
 from urllib.parse import parse_qs, urlparse
 
 from .browser_session import DEFAULT_CDP_ENDPOINT, PlaywrightBrowserSession
+from .progress import ProgressCallback, ProgressEvent
 from .watchlater_removal import (
     checkpoint_removal,
     finish_removal_run,
@@ -402,6 +403,8 @@ def execute_removal_plan(
     backoff: float = 2.0,
     sleeper: Callable[[float], None] = time.sleep,
     progress: Callable[[str], None] | None = None,
+    progress_events: ProgressCallback | None = None,
+    phase: str = "Watch Later removal",
 ) -> BrowserRemovalResult:
     if max_deletes is not None and max_deletes < 0:
         raise ValueError("--max-deletes cannot be negative")
@@ -442,6 +445,41 @@ def execute_removal_plan(
         conn.execute("UPDATE watchlater_removal_runs SET status = 'running' WHERE id = ?", (run_id,))
 
     removed = absent = not_found = failed = stale_runtime = destructive = 0
+    completed_items = 0
+
+    if progress_events is not None:
+        progress_events(
+            ProgressEvent(
+                phase=phase,
+                kind="start",
+                completed=0,
+                total=len(pending),
+                unit="video",
+                detail=f"run {run_id}",
+            )
+        )
+
+    def mark_processed(detail: str | None = None) -> None:
+        nonlocal completed_items
+        completed_items += 1
+        if progress_events is not None:
+            progress_events(
+                ProgressEvent(
+                    phase=phase,
+                    kind="update",
+                    completed=completed_items,
+                    total=len(pending),
+                    unit="video",
+                    detail=detail,
+                    counters={
+                        "removed": removed,
+                        "absent": absent,
+                        "not_found": not_found,
+                        "failed": failed,
+                        "stale": stale_runtime,
+                    },
+                )
+            )
 
     def emit(message: str) -> None:
         if progress is not None:
@@ -452,6 +490,7 @@ def execute_removal_plan(
         if not removal_item_is_authorized(conn, run, item):
             stale_runtime += 1
             emit(f"Skipping stale removal decision for {item['video_id']}")
+            mark_processed("stale decision")
             return
 
         video_id = str(item["video_id"])
@@ -474,10 +513,20 @@ def execute_removal_plan(
                 last_error = exc
                 if attempt_index >= retries:
                     break
-            if backoff:
-                sleeper(backoff * (2**attempt_index))
+            delay = backoff * (2**attempt_index)
+            if progress_events is not None:
+                progress_events(
+                    ProgressEvent(
+                        phase=phase,
+                        kind="retry",
+                        detail=f"{video_id}: retry {attempt_index + 2}/{retries + 1} in {delay:g}s",
+                    )
+                )
+            if delay:
+                sleeper(delay)
 
         if final is None and last_error is None:
+            mark_processed("stale decision")
             return
         if final is None:
             failed += 1
@@ -489,6 +538,7 @@ def execute_removal_plan(
                 error=str(last_error),
             )
             emit(f"Failed {video_id}: {last_error}")
+            mark_processed(f"{video_id} failed")
             return
 
         if final.status == "removed":
@@ -503,6 +553,14 @@ def execute_removal_plan(
             )
             emit(f"Removed {video_id}; checkpoint saved")
             if interval:
+                if progress_events is not None:
+                    progress_events(
+                        ProgressEvent(
+                            phase=phase,
+                            kind="status",
+                            detail=f"waiting {interval:g}s before next removal",
+                        )
+                    )
                 sleeper(interval)
         elif final.status == "already_absent":
             absent += 1
@@ -524,6 +582,7 @@ def execute_removal_plan(
                 error=final.detail,
             )
             emit(f"Not found {video_id}; left retriable")
+        mark_processed(video_id)
 
     scan_matching = getattr(client, "scan_matching_videos", None)
     remove_loaded = getattr(client, "remove_loaded_video", None)
@@ -565,6 +624,7 @@ def execute_removal_plan(
                     absent += 1
                 else:
                     not_found += 1
+                mark_processed(video_id)
             break
     else:
         for item in pending:
@@ -573,6 +633,17 @@ def execute_removal_plan(
             process_candidate(item, client.remove_video)
 
     status, remaining = finish_removal_run(conn, run_id)
+    if progress_events is not None:
+        progress_events(
+            ProgressEvent(
+                phase=phase,
+                kind="finish",
+                completed=completed_items,
+                total=len(pending),
+                unit="video",
+                detail=f"status={status} remaining={remaining}",
+            )
+        )
     return BrowserRemovalResult(
         run_id=run_id,
         applied=True,

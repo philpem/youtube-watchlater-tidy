@@ -163,8 +163,15 @@ class YouTubeApiExecutionTests(unittest.TestCase):
 
     def test_apply_live_checks_duplicates_creates_destination_and_checkpoints(self) -> None:
         client = FakeYouTubeClient()
+        events = []
         with open_catalogue(self.db_path) as conn:
-            result = execute_api_plan(conn, self.plan.run_id, client=client, apply=True)
+            result = execute_api_plan(
+                conn,
+                self.plan.run_id,
+                client=client,
+                apply=True,
+                progress=events.append,
+            )
             payload = plan_payload(conn, self.plan.run_id)
 
         self.assertTrue(result.applied)
@@ -185,6 +192,10 @@ class YouTubeApiExecutionTests(unittest.TestCase):
         )
         self.assertEqual(destination["status"], "created")
         self.assertTrue(destination["destination_playlist_id"].startswith("PL_NEW_"))
+        self.assertEqual(events[0].kind, "status")
+        self.assertEqual(next(event for event in events if event.kind == "start").total, 2)
+        self.assertEqual(events[-1].kind, "finish")
+        self.assertEqual(events[-1].completed, 2)
 
     def test_planner_already_present_is_rechecked_live_before_success(self) -> None:
         # Re-plan from an inventory which says A is present, then simulate it disappearing

@@ -14,6 +14,25 @@ watchlater-remove execute --help
 
 The installed version's `--help` output is authoritative for individual options.
 
+## Progress and long-running commands
+
+Long-running network, browser and LLM operations report progress on **stderr** so
+machine-readable stdout remains clean. Commands that support the common progress policy
+accept:
+
+```text
+--progress auto|always|never
+```
+
+`auto` uses a live progress display on an interactive terminal and concise milestone
+updates when stderr is redirected. `always` forces progress rendering where possible,
+while `never` suppresses it. Existing `--no-progress` options remain accepted as a
+compatibility alias for `--progress never`.
+
+LLM annotation with `--taxonomy discover` reports taxonomy discovery separately from
+the subsequent annotation batches. Provider retry/backoff periods are also surfaced so a
+deliberate retry delay does not look like a hung process.
+
 ## Catalogue and deterministic triage
 
 ```text

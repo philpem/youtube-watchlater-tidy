@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .db import open_catalogue
+from .progress import add_progress_argument, progress_enabled, selected_progress_mode
 from .rich_metadata import candidate_video_ids, enrich_rich_metadata
 
 DEFAULT_DB = Path("watchlater.sqlite3")
@@ -44,6 +45,7 @@ def _parser() -> argparse.ArgumentParser:
         help="minimum seconds between starting yt-dlp requests (default: 0.5)",
     )
     enrich.add_argument("--dry-run", action="store_true")
+    add_progress_argument(enrich)
     enrich.add_argument("--no-progress", action="store_true")
 
     show = sub.add_parser("show", help="show the latest yt-dlp metadata observation")
@@ -83,7 +85,7 @@ def _cmd_enrich(args: argparse.Namespace) -> int:
             yt_dlp=args.yt_dlp,
             workers=args.workers,
             start_interval=args.interval,
-            show_progress=not args.no_progress,
+            show_progress=progress_enabled(selected_progress_mode(args)),
         )
 
     print(

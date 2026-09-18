@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .db import open_catalogue
+from .progress import add_progress_argument, progress_enabled, selected_progress_mode
 from .transcripts import (
     candidate_video_ids,
     fetch_transcripts,
@@ -64,6 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     fetch.add_argument("--timeout", type=float, default=30.0)
     fetch.add_argument("--dry-run", action="store_true")
+    add_progress_argument(fetch)
     fetch.add_argument("--no-progress", action="store_true")
 
     show = sub.add_parser("show", help="show the latest successfully cached transcript")
@@ -112,7 +114,7 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
             workers=args.workers,
             start_interval=args.interval,
             timeout=args.timeout,
-            show_progress=not args.no_progress,
+            show_progress=progress_enabled(selected_progress_mode(args)),
         )
 
     print(

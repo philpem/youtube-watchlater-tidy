@@ -10,6 +10,7 @@ from typing import Callable, Protocol, TypeVar
 from .multi_destination import current_move_authorizes_destination
 from .multi_destination_support import plan_payload
 from .playlist_sync import ensure_playlist_sync_schema
+from .progress import ProgressCallback, ProgressEvent
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,8 @@ def _retry(
     retries: int,
     backoff: float,
     sleeper: Callable[[float], None],
+    progress: ProgressCallback | None = None,
+    phase: str = "Playlist sync",
 ) -> T:
     last: Exception | None = None
     for attempt in range(retries + 1):
@@ -194,8 +197,17 @@ def _retry(
             last = exc
             if attempt >= retries:
                 raise
-            if backoff:
-                sleeper(backoff * (2**attempt))
+            delay = backoff * (2**attempt)
+            if progress is not None:
+                progress(
+                    ProgressEvent(
+                        phase=phase,
+                        kind="retry",
+                        detail=f"{exc}; retry {attempt + 2}/{retries + 1} in {delay:g}s",
+                    )
+                )
+            if delay:
+                sleeper(delay)
     assert last is not None
     raise last
 
@@ -211,6 +223,8 @@ def execute_browser_plan(
     retries: int = 1,
     backoff: float = 2.0,
     sleeper: Callable[[float], None] = time.sleep,
+    progress: ProgressCallback | None = None,
+    phase: str = "Playlist sync (browser)",
 ) -> BrowserExecutionResult:
     ensure_playlist_sync_schema(conn)
     if max_writes is not None and max_writes < 0:
@@ -271,7 +285,16 @@ def execute_browser_plan(
     if client is None:
         raise ValueError("a browser playlist client is required with --apply")
 
-    live = _retry(client.list_playlists, retries=retries, backoff=backoff, sleeper=sleeper)
+    if progress is not None:
+        progress(ProgressEvent(phase=phase, kind="status", detail="loading live playlists"))
+    live = _retry(
+        client.list_playlists,
+        retries=retries,
+        backoff=backoff,
+        sleeper=sleeper,
+        progress=progress,
+        phase=phase,
+    )
     by_id = {row.playlist_id: row for row in live}
     by_title: dict[str, list[BrowserPlaylist]] = {}
     for row in live:
@@ -298,9 +321,46 @@ def execute_browser_plan(
         (run_id,),
     ).fetchall()
 
+    completed_items = 0
+
+    def mark_processed(detail: str | None = None) -> None:
+        nonlocal completed_items
+        completed_items += 1
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase=phase,
+                    kind="update",
+                    completed=completed_items,
+                    total=len(items),
+                    unit="item",
+                    detail=detail,
+                    counters={
+                        "created": created,
+                        "inserted": inserted,
+                        "present": present,
+                        "failed": failed,
+                        "stale": stale_runtime,
+                    },
+                )
+            )
+
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="start",
+                completed=0,
+                total=len(items),
+                unit="item",
+                detail=f"run {run_id}",
+            )
+        )
+
     for item in items:
         if not _current_decision_matches(conn, run, item):
             stale_runtime += 1
+            mark_processed("stale decision")
             continue
 
         destination = conn.execute(
@@ -345,6 +405,8 @@ def execute_browser_plan(
                         retries=retries,
                         backoff=backoff,
                         sleeper=sleeper,
+                        progress=progress,
+                        phase=phase,
                     )
                     writes += 1
                     created += 1
@@ -359,10 +421,19 @@ def execute_browser_plan(
                         status="created",
                     )
                     if interval:
+                        if progress is not None:
+                            progress(
+                                ProgressEvent(
+                                    phase=phase,
+                                    kind="status",
+                                    detail=f"waiting {interval:g}s before next write",
+                                )
+                            )
                         sleeper(interval)
 
             if not _current_decision_matches(conn, run, item):
                 stale_runtime += 1
+                mark_processed("stale decision")
                 continue
 
             existing = _retry(
@@ -370,6 +441,8 @@ def execute_browser_plan(
                 retries=retries,
                 backoff=backoff,
                 sleeper=sleeper,
+                progress=progress,
+                phase=phase,
             )
             if existing is not None:
                 present += 1
@@ -382,6 +455,7 @@ def execute_browser_plan(
                     playlist_item_id=existing.playlist_item_id,
                     status="already_present",
                 )
+                mark_processed("already present")
                 continue
 
             if not can_write():
@@ -392,6 +466,8 @@ def execute_browser_plan(
                 retries=retries,
                 backoff=backoff,
                 sleeper=sleeper,
+                progress=progress,
+                phase=phase,
             )
             writes += 1
             inserted += 1
@@ -405,6 +481,14 @@ def execute_browser_plan(
                 status="inserted",
             )
             if interval:
+                if progress is not None:
+                    progress(
+                        ProgressEvent(
+                            phase=phase,
+                            kind="status",
+                            detail=f"waiting {interval:g}s before next write",
+                        )
+                    )
                 sleeper(interval)
         except Exception as exc:
             failed += 1
@@ -417,12 +501,25 @@ def execute_browser_plan(
                 status="failed",
                 error=str(exc),
             )
+        mark_processed(str(item["video_id"]))
 
     status, remaining = _finish_run(conn, run_id)
     if stopped_for_cap and status == "complete":
         status = "partial"
         with conn:
             conn.execute("UPDATE playlist_sync_runs SET status='partial' WHERE id=?", (run_id,))
+
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="finish",
+                completed=completed_items,
+                total=len(items),
+                unit="item",
+                detail=f"status={status} remaining={remaining}",
+            )
+        )
 
     return BrowserExecutionResult(
         run_id=run_id,

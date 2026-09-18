@@ -8,6 +8,12 @@ from pathlib import Path
 from .browser_session import DEFAULT_CDP_ENDPOINT
 from .db import open_catalogue
 from .multi_destination_support import create_removal_plan
+from .progress import (
+    ConsoleProgress,
+    add_progress_argument,
+    legacy_message_callback,
+    selected_progress_mode,
+)
 from .watchlater_browser import (
     DEFAULT_BROWSER_PROFILE,
     PlaywrightWatchLaterClient,
@@ -73,6 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("--remove-label", default="Remove from Watch later")
     execute.add_argument("--max-scrolls", type=int, default=250)
     execute.add_argument("--scroll-pause", type=float, default=0.7)
+    add_progress_argument(execute, include_no_progress=True)
     return parser
 
 
@@ -115,9 +122,8 @@ def _cmd_login(args: argparse.Namespace) -> int:
 
 def _cmd_execute(args: argparse.Namespace) -> int:
     client = None
-
-    def progress(message: str) -> None:
-        print(message, file=sys.stderr, flush=True)
+    progress_reporter = ConsoleProgress(selected_progress_mode(args))
+    progress = legacy_message_callback(progress_reporter, "Watch Later removal")
 
     try:
         with open_catalogue(args.db) as conn:
@@ -156,6 +162,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
                 retries=args.retries,
                 backoff=args.backoff,
                 progress=progress,
+                progress_events=progress_reporter,
             )
             payload = removal_plan_payload(conn, run_id) if args.json else None
         execution = {
@@ -189,6 +196,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
             )
         return 0 if result.failed == 0 and result.stale == 0 else 1
     finally:
+        progress_reporter.close()
         if client is not None:
             client.close()
 
