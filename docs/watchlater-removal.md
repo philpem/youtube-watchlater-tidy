@@ -113,6 +113,16 @@ watchlater-remove execute --run-id 3
 
 Without `--apply`, there is no browser creation and no checkpoint mutation.
 
+`execute` prints one concise result line after the live progress messages. To emit the
+complete execution object and stored plan for a script or detailed inspection, add `--json`:
+
+```bash
+watchlater-remove execute --run-id 3 --json
+```
+
+`watchlater-remove show --run-id 3` remains the focused command for inspecting the
+stored plan and per-video checkpoints.
+
 ## Destructive execution
 
 A real run requires both flags:
