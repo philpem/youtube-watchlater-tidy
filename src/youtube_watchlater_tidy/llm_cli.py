@@ -23,6 +23,7 @@ from .llm_annotation_store import (
     content_filtered_retry_target,
     incomplete_annotation_run_id,
     latest_annotation_run_id,
+    reusable_annotation_run_id,
     store_annotation_batch,
 )
 from .llm_classification import (
@@ -599,6 +600,7 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 provider_sha256=provider_sha,
                 prompt_sha256=prompt.sha256,
                 input_sha256=input_sha,
+                required_context={"stage": "semantic_annotation"},
             )
             if cached is not None:
                 output = annotation_run_payload(conn, cached)
@@ -606,14 +608,30 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
                 return 0
 
+            reusable = reusable_annotation_run_id(
+                conn,
+                snapshot_id=snapshot_id,
+                prompt_sha256=prompt.sha256,
+                input_sha256=input_sha,
+                required_context={"stage": "semantic_annotation"},
+            )
+            if reusable is not None:
+                output = annotation_run_payload(conn, reusable)
+                output["cache"] = "semantic-hit"
+                output["requested_provider"] = provider.name
+                output["requested_model"] = provider.model
+                print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+                return 0
+
             partial = incomplete_annotation_run_id(
                 conn,
                 snapshot_id=snapshot_id,
-                requested_model=provider.model,
+                requested_model=None,
                 prompt_sha256=prompt.sha256,
                 input_sha256=input_sha,
                 videos=videos,
                 batch_size=args.batch_size,
+                required_context={"stage": "semantic_annotation"},
             )
             if partial is not None:
                 run_id = partial
@@ -626,7 +644,8 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 print(
                     f"Resuming annotation run {run_id}: "
                     f"{len(completed_batch_indexes)} batch(es), "
-                    f"{completed_videos}/{len(videos)} video(s) already checkpointed",
+                    f"{completed_videos}/{len(videos)} video(s) already checkpointed; "
+                    f"remaining batches will use {provider.name}/{provider.model}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -702,6 +721,7 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
                 batch_index=index,
                 videos=batch,
                 result=batch_result,
+                provider=provider,
             )
 
         with ConsoleProgress(selected_progress_mode(args)) as progress:
@@ -1009,6 +1029,7 @@ def _cmd_retry_content_filtered(args: argparse.Namespace) -> int:
                 batch_index=index,
                 videos=batch,
                 result=batch_result,
+                provider=provider,
             )
 
         with ConsoleProgress(selected_progress_mode(args)) as progress:
