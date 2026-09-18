@@ -282,7 +282,26 @@ firefox review-after.html
 
 The HTML report does not currently create `move` decisions because a move also needs destination playlist information. Record those through the CLI selection/playlist workflow instead.
 
-## 8. Plan and execute destination playlist moves
+## 8. Choose the execution branch
+
+You do **not** need a destination-playlist inventory when you only want to remove videos
+marked `archive` or `delete` from Watch Later:
+
+```bash
+watchlater-remove plan --output removal-plan.json
+watchlater-remove show
+```
+
+Skip directly to [the Watch Later browser setup](#11-set-up-a-manually-authenticated-browser-session),
+then dry-run and apply the removal plan. Do not run `watchlater-playlist plan` for this
+removal-only workflow; that command is exclusively for `move` decisions and therefore needs
+an inventory of normal destination playlists.
+
+If the current decisions include `move`, complete the destination-playlist branch below
+first. A later removal plan will include `archive` and `delete` immediately, while holding
+each `move` until all of its destinations are confirmed.
+
+## 9. Plan and execute destination playlist moves
 
 **From this point onward, commands can write to YouTube.** `keep` and `review` need no external action. `archive` and `delete` go to the Watch Later removal workflow. `move` must complete destination playlist synchronization first.
 
@@ -348,7 +367,7 @@ Both executors check live membership before insertion, checkpoint every destinat
 
 See [`docs/playlist-sync.md`](playlist-sync.md) and [`docs/playlist-browser.md`](playlist-browser.md).
 
-## 9. Build a Watch Later removal plan
+## 10. Build a Watch Later removal plan
 
 ```bash
 watchlater-remove plan --output removal-plan.json
@@ -364,7 +383,7 @@ Planner-time inventory-only membership is never enough. If even one destination 
 
 Old removal plans become stale when the current decision event changes.
 
-## 10. Set up a manually authenticated browser session
+## 11. Set up a manually authenticated browser session
 
 Google may block sign-in from a browser launched under automation. The recommended browser workflow therefore uses an ordinary Chrome/Chromium process that you start yourself with a dedicated profile and DevTools endpoint:
 
@@ -386,7 +405,7 @@ watchlater-playlist browser-login --cdp-endpoint http://127.0.0.1:9222
 
 The legacy `.watchlater-playwright-profile/` mode is retained for profiles that are already authenticated, but new Google logins should use the attached-browser flow.
 
-## 11. Dry-run selective Watch Later execution
+## 12. Dry-run selective Watch Later execution
 
 ```bash
 watchlater-remove execute --run-id REMOVAL_PLAN_ID
@@ -394,7 +413,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID
 
 Without `--apply`, there is no browser creation and no checkpoint mutation.
 
-## 12. Apply selective Watch Later removal
+## 13. Apply selective Watch Later removal
 
 Real removal requires both explicit flags:
 
@@ -424,7 +443,7 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
 
 Headed mode is the default. See [`docs/watchlater-removal.md`](watchlater-removal.md).
 
-## 13. Recommended end-to-end sequence
+## 14. Recommended end-to-end sequence
 
 ```bash
 # export/import
@@ -465,14 +484,14 @@ watchlater-remove execute --run-id REMOVAL_PLAN_ID \
     --apply --confirm-remove --max-deletes 3
 ```
 
-## 14. Current limitations
+## 15. Current limitations
 
 - Saved rules and LLM destination proposals currently express one destination; multiple destinations are an explicit human assignment through `watchlater-playlist assign`.
 - YouTube UI selectors/text can change without notice; browser execution deliberately fails rather than guessing when identity/menu checks do not match.
 - Browser playlist creation relies on YouTube's normal private default for private playlists; non-private creation is attempted only when a recognizable privacy control is present.
 - Transcript escalation uses existing captions only; audio transcription is not performed by default.
 
-## 15. Detailed documentation
+## 16. Detailed documentation
 
 - [`docs/install.md`](install.md) — installation, private local files and updates.
 - [`docs/cli-reference.md`](cli-reference.md) — command families and ID placeholders.

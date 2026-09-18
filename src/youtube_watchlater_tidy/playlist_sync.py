@@ -406,7 +406,6 @@ def create_plan(
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
 
-    meta = _inventory_meta(conn)
     if snapshot_id is None:
         snapshot_id = latest_snapshot_id(conn)
     snapshot = conn.execute("SELECT 1 FROM snapshots WHERE id = ?", (snapshot_id,)).fetchone()
@@ -425,6 +424,20 @@ def create_plan(
         """,
         (snapshot_id,),
     ).fetchall()
+    if not decisions:
+        raise ValueError(
+            "snapshot has no current move decisions; watchlater-playlist only plans destination "
+            "moves. For archive/delete removal without destination playlists, run "
+            "'watchlater-remove plan' instead"
+        )
+
+    try:
+        meta = _inventory_meta(conn)
+    except ValueError as exc:
+        raise ValueError(
+            f"{exc}. For archive/delete removal without destination playlists, run "
+            "'watchlater-remove plan' instead"
+        ) from exc
 
     destination_info: dict[str, dict[str, Any]] = {}
     for row in decisions:

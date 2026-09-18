@@ -191,6 +191,22 @@ class MultiDestinationTests(unittest.TestCase):
             ensure_decision_destinations_schema(conn)
             self.assertEqual(destinations_for_decision(conn, int(row["id"])), ("Queue A",))
 
+    def test_removal_only_catalogue_points_to_removal_planner_without_inventory(self) -> None:
+        db_path = Path(self.tmp.name) / "removal-only.sqlite3"
+        source = Path(self.tmp.name) / "removal-only.json"
+        source.write_text(
+            json.dumps(
+                {"id": "WL", "entries": [{"id": "remove00001", "title": "Remove"}]}
+            ),
+            encoding="utf-8",
+        )
+        with open_catalogue(db_path) as conn:
+            snapshot = import_watchlater_json(conn, source).snapshot_id
+            selection = select_title(conn, contains="Remove", snapshot_id=snapshot)
+            apply_selection_action(conn, "archive", selection_id=selection.selection_id)
+            with self.assertRaisesRegex(ValueError, "watchlater-remove plan"):
+                create_plan(conn, snapshot, backend="browser")
+
     def test_assignment_preserves_primary_and_deduplicates_destinations(self) -> None:
         event_id = self._record_multi()
         with open_catalogue(self.db_path) as conn:

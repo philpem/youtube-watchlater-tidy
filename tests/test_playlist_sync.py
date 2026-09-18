@@ -178,6 +178,20 @@ class PlaylistSyncPlannerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no playlist inventory"):
                 create_plan(conn, snapshot)
 
+    def test_no_move_decisions_points_to_removal_workflow_before_inventory(self) -> None:
+        other_db = self.root / "removal-only.sqlite3"
+        other_source = self.root / "removal-only.json"
+        other_source.write_text(
+            json.dumps({"id": "WL", "entries": [{"id": "x", "title": "X"}]}),
+            encoding="utf-8",
+        )
+        with open_catalogue(other_db) as conn:
+            snapshot = import_watchlater_json(conn, other_source).snapshot_id
+            selection = select_title(conn, contains="X", snapshot_id=snapshot)
+            apply_selection_action(conn, "delete", selection_id=selection.selection_id)
+            with self.assertRaisesRegex(ValueError, "watchlater-remove plan"):
+                create_plan(conn, snapshot, backend="browser")
+
     def test_inventory_round_trip_preserves_contents(self) -> None:
         with open_catalogue(self.db_path) as conn:
             payload = inventory_payload(conn)

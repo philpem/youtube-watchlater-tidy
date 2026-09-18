@@ -107,7 +107,7 @@ def _parser() -> argparse.ArgumentParser:
 
     plan = sub.add_parser(
         "plan",
-        help="build and persist a dry-run plan from current local move decisions",
+        help="plan destination moves (use watchlater-remove for archive/delete-only cleanup)",
     )
     plan.add_argument("--snapshot", type=int)
     plan.add_argument("--backend", choices=("api", "browser"), default="api")
