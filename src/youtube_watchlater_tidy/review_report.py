@@ -280,15 +280,23 @@ def render_review_html(snapshot_id: int, rows: list[dict[str, Any]]) -> str:
 <style>
 :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
 body {{ margin: 1rem; }}
-header {{ position: sticky; top: 0; background: Canvas; padding: .5rem 0; z-index: 2; }}
+header {{ background: Canvas; padding: .5rem 0; }}
 .controls {{ display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }}
 .pagination {{ display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .5rem 0; }}
 .pagination button:disabled {{ opacity: .5; }}
 input, select, button {{ font: inherit; padding: .35rem; }}
 #summary {{ margin: .5rem 0; font-size: .9rem; }}
+.facets {{ display: grid; gap: .55rem; margin: .7rem 0 1rem; padding: .65rem; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .4rem; }}
+.facet-row {{ display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }}
+.facet-label {{ min-width: 7rem; font-weight: 600; }}
+.facet-chip {{ border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); border-radius: 999px; background: Canvas; cursor: pointer; padding: .2rem .5rem; }}
+.facet-chip.active {{ font-weight: 700; outline: 2px solid color-mix(in srgb, CanvasText 45%, transparent); }}
+.semantic-category {{ font-weight: 700; margin-bottom: .15rem; }}
+.semantic-subject {{ margin-bottom: .25rem; }}
+.semantic-tags {{ display: flex; flex-wrap: wrap; gap: .25rem; margin-bottom: .4rem; }}
 table {{ border-collapse: collapse; width: 100%; font-size: .85rem; }}
 th, td {{ border-bottom: 1px solid color-mix(in srgb, CanvasText 25%, transparent); padding: .4rem; vertical-align: top; }}
-th {{ position: sticky; top: 5.8rem; background: Canvas; text-align: left; }}
+th {{ position: sticky; top: 0; z-index: 1; background: Canvas; text-align: left; }}
 .thumb {{ width: 120px; max-height: 80px; object-fit: contain; }}
 .title {{ min-width: 20rem; }}
 .reason {{ max-width: 28rem; white-space: normal; }}
@@ -319,6 +327,11 @@ footer {{ margin-top: 1rem; font-size: .8rem; opacity: .8; }}
 <button id="lastPage" type="button">Last »</button>
 </div>
 <div id="summary"></div>
+<section id="facets" class="facets">
+<div class="facet-row"><span class="facet-label">Categories</span><div id="categoryFacets" class="facet-row"></div></div>
+<div class="facet-row"><span class="facet-label">Top tags</span><div id="tagFacets" class="facet-row"></div></div>
+<div class="facet-row"><button id="clearSemanticFilters" type="button">Clear semantic filters</button><span id="semanticStatus" class="small"></span></div>
+</section>
 </header>
 <table>
 <thead><tr><th>Pos</th><th>Video</th><th>Title / metadata</th><th>Current decision</th><th>Latest LLM suggestion</th><th>Human override</th></tr></thead>
@@ -328,6 +341,8 @@ footer {{ margin-top: 1rem; font-size: .8rem; opacity: .8; }}
 <script>
 const DATA={data};
 const state = new Map();
+const selectedCategories = new Set();
+const selectedTags = new Set();
 let currentPage = 1;
 const searchEl = document.getElementById('search');
 const currentFilterEl = document.getElementById('currentFilter');
@@ -343,6 +358,10 @@ const lastPageEl = document.getElementById('lastPage');
 const pageStatusEl = document.getElementById('pageStatus');
 const rowsEl = document.getElementById('rows');
 const summaryEl = document.getElementById('summary');
+const categoryFacetsEl = document.getElementById('categoryFacets');
+const tagFacetsEl = document.getElementById('tagFacets');
+const clearSemanticFiltersEl = document.getElementById('clearSemanticFilters');
+const semanticStatusEl = document.getElementById('semanticStatus');
 const exportButtonEl = document.getElementById('exportButton');
 const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));
 const dur=s=>s==null?'-':`${{Math.floor(s/60)}}:${{String(Math.round(s%60)).padStart(2,'0')}}`;
