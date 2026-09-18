@@ -152,6 +152,10 @@ def _provider(name: str, raw: dict[str, Any]) -> ProviderConfig:
     if api_key_env is not None and not isinstance(api_key_env, str):
         raise ValueError(f"provider {name!r}: api_key_env must be a string")
 
+    stream = raw.get("stream", preset == "openrouter")
+    if not isinstance(stream, bool):
+        raise ValueError(f"provider {name!r}: stream must be a boolean")
+
     config = ProviderConfig(
         name=name,
         preset=preset,
@@ -163,7 +167,7 @@ def _provider(name: str, raw: dict[str, Any]) -> ProviderConfig:
         retries=int(raw.get("retries", 2)),
         temperature=float(raw.get("temperature", 0.0)),
         max_tokens=int(raw.get("max_tokens", DEFAULT_MAX_TOKENS)),
-        stream=bool(raw.get("stream", preset == "openrouter")),
+        stream=stream,
         structured_mode=structured_mode,
         extra=dict(extra),
         headers=headers,
