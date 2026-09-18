@@ -76,12 +76,16 @@ class FakeStarter:
 
 
 class BrowserSessionTests(unittest.TestCase):
-    def _module(self, playwright: FakePlaywright):
-        return types.SimpleNamespace(sync_playwright=lambda: FakeStarter(playwright))
+    def _modules(self, playwright: FakePlaywright):
+        parent = types.ModuleType("playwright")
+        parent.__path__ = []
+        sync_api = types.ModuleType("playwright.sync_api")
+        sync_api.sync_playwright = lambda: FakeStarter(playwright)
+        return {"playwright": parent, "playwright.sync_api": sync_api}
 
     def test_cdp_mode_attaches_to_existing_context_and_owns_only_new_page(self) -> None:
         fake = FakePlaywright()
-        with patch.dict(sys.modules, {"playwright.sync_api": self._module(fake)}):
+        with patch.dict(sys.modules, self._modules(fake)):
             session = PlaywrightBrowserSession(
                 user_data_dir=Path("ignored"),
                 cdp_endpoint="http://127.0.0.1:9222",
@@ -98,7 +102,7 @@ class BrowserSessionTests(unittest.TestCase):
 
     def test_launch_mode_preserves_existing_persistent_profile_behavior(self) -> None:
         fake = FakePlaywright()
-        with patch.dict(sys.modules, {"playwright.sync_api": self._module(fake)}):
+        with patch.dict(sys.modules, self._modules(fake)):
             session = PlaywrightBrowserSession(
                 user_data_dir=Path("/tmp/watchlater-profile"),
                 headless=True,
