@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from .llm_annotation import AnnotationPrompt, AnnotationRunResult
+from .llm_annotation import AnnotationBatchResult, AnnotationPrompt, AnnotationRunResult
 from .llm_classification import evidence_hash
 from .llm_config import ProviderConfig
 from .llm_store import evidence_item_hash, provider_fingerprint
@@ -68,6 +68,246 @@ def cached_annotation_run_id(
     return None if row is None else int(row["id"])
 
 
+def incomplete_annotation_run_id(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    provider_sha256: str,
+    prompt_sha256: str,
+    input_sha256: str,
+    videos: list[Any],
+    batch_size: int,
+) -> int | None:
+    """Return the newest exact incomplete run whose stored batch boundaries still match."""
+
+    candidates = conn.execute(
+        """
+        SELECT id
+        FROM llm_annotation_runs
+        WHERE snapshot_id = ?
+          AND provider_sha256 = ?
+          AND prompt_sha256 = ?
+          AND input_sha256 = ?
+          AND status = 'error'
+        ORDER BY id DESC
+        """,
+        (snapshot_id, provider_sha256, prompt_sha256, input_sha256),
+    ).fetchall()
+    batches = [
+        videos[index : index + batch_size]
+        for index in range(0, len(videos), batch_size)
+    ]
+    for candidate in candidates:
+        run_id = int(candidate["id"])
+        stored = conn.execute(
+            """
+            SELECT batch_index, input_sha256
+            FROM llm_annotation_batches
+            WHERE run_id = ?
+            ORDER BY batch_index
+            """,
+            (run_id,),
+        ).fetchall()
+        compatible = True
+        for row in stored:
+            batch_index = int(row["batch_index"])
+            if batch_index < 0 or batch_index >= len(batches):
+                compatible = False
+                break
+            if row["input_sha256"] != evidence_hash(batches[batch_index]):
+                compatible = False
+                break
+        if compatible:
+            return run_id
+    return None
+
+
+def annotation_completed_batch_indexes(
+    conn: sqlite3.Connection,
+    run_id: int,
+) -> set[int]:
+    return {
+        int(row["batch_index"])
+        for row in conn.execute(
+            "SELECT batch_index FROM llm_annotation_batches WHERE run_id = ?",
+            (run_id,),
+        )
+    }
+
+
+def _provider_config_payload(
+    provider: ProviderConfig,
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "name": provider.name,
+        "preset": provider.preset,
+        "base_url": provider.base_url,
+        "model": provider.model,
+        "temperature": provider.temperature,
+        "max_tokens": provider.max_tokens,
+        "structured_mode": provider.structured_mode,
+        "extra": provider.extra,
+        "annotation_context": context or {},
+    }
+
+
+def begin_annotation_run(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    provider: ProviderConfig,
+    prompt: AnnotationPrompt,
+    videos: list[Any],
+    taxonomy_source: str,
+    selection_id: int | None = None,
+    context: dict[str, Any] | None = None,
+) -> int:
+    provider_sha, input_sha, cache_key = annotation_cache_key(provider, prompt, videos)
+    provider_config = _provider_config_payload(provider, context)
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO llm_annotation_runs (
+                snapshot_id, selection_id, created_at, status,
+                provider_name, provider_preset, requested_model,
+                provider_sha256, prompt_sha256, input_sha256, cache_key,
+                interest_profile, taxonomy_source, taxonomy_json,
+                video_count, provider_config_json
+            ) VALUES (?, ?, ?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                selection_id,
+                _utc_now(),
+                provider.name,
+                provider.preset,
+                provider.model,
+                provider_sha,
+                prompt.sha256,
+                input_sha,
+                cache_key,
+                prompt.profile_name,
+                taxonomy_source,
+                json.dumps(prompt.categories, ensure_ascii=False, sort_keys=True),
+                len(videos),
+                json.dumps(provider_config, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+    return int(cursor.lastrowid)
+
+
+def store_annotation_batch(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    batch_index: int,
+    videos: list[Any],
+    result: AnnotationBatchResult,
+) -> None:
+    if len(result.annotations) != len(videos):
+        raise ValueError("cannot checkpoint annotation batch: annotation/video count mismatch")
+    evidence_by_id = {video.video_id: video for video in videos}
+    if len(evidence_by_id) != len(videos):
+        raise ValueError("cannot checkpoint annotation batch with duplicate video IDs")
+    annotation_ids = {annotation.video_id for annotation in result.annotations}
+    if annotation_ids != set(evidence_by_id):
+        raise ValueError("cannot checkpoint annotation batch: annotation/video IDs mismatch")
+
+    with conn:
+        existing = conn.execute(
+            """
+            SELECT 1 FROM llm_annotation_batches
+            WHERE run_id = ? AND batch_index = ?
+            """,
+            (run_id, batch_index),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(
+                f"annotation run {run_id} batch {batch_index} is already checkpointed"
+            )
+        batch_cursor = conn.execute(
+            """
+            INSERT INTO llm_annotation_batches (
+                run_id, batch_index, input_sha256, response_model,
+                usage_json, raw_response_json, validated_json
+            ) VALUES (?, ?, ?, ?, ?, '{}', ?)
+            """,
+            (
+                run_id,
+                batch_index,
+                result.input_sha256,
+                result.response_model,
+                json.dumps(result.usage, ensure_ascii=False, sort_keys=True),
+                _validated_batch_json(result.annotations),
+            ),
+        )
+        batch_id = int(batch_cursor.lastrowid)
+        for annotation in result.annotations:
+            evidence = evidence_by_id[annotation.video_id]
+            conn.execute(
+                """
+                INSERT INTO llm_annotations (
+                    run_id, batch_id, video_id, playlist_position,
+                    evidence_sha256, evidence_json,
+                    primary_category, subject, tags_json,
+                    content_type, confidence, raw_result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    batch_id,
+                    annotation.video_id,
+                    evidence.playlist_position,
+                    evidence_item_hash(evidence),
+                    json.dumps(
+                        evidence.as_payload(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    annotation.primary_category,
+                    annotation.subject,
+                    json.dumps(list(annotation.tags), ensure_ascii=False),
+                    annotation.content_type,
+                    annotation.confidence,
+                    json.dumps(
+                        annotation.as_payload(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+
+
+def complete_annotation_run(conn: sqlite3.Connection, run_id: int) -> None:
+    row = conn.execute(
+        """
+        SELECT r.video_count, COUNT(a.id) AS stored_count
+        FROM llm_annotation_runs AS r
+        LEFT JOIN llm_annotations AS a ON a.run_id = r.id
+        WHERE r.id = ?
+        GROUP BY r.id
+        """,
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"LLM annotation run {run_id} does not exist")
+    expected = int(row["video_count"])
+    stored = int(row["stored_count"])
+    if stored != expected:
+        raise ValueError(
+            f"cannot complete annotation run {run_id}: "
+            f"{stored}/{expected} annotations are checkpointed"
+        )
+    with conn:
+        conn.execute(
+            "UPDATE llm_annotation_runs SET status = 'complete' WHERE id = ?",
+            (run_id,),
+        )
+
+
 def _validated_batch_json(annotations: tuple[Any, ...]) -> str:
     return json.dumps(
         {"annotations": [item.as_payload() for item in annotations]},
@@ -89,111 +329,35 @@ def store_annotation_run(
     selection_id: int | None = None,
     context: dict[str, Any] | None = None,
 ) -> int:
+    """Store an already-complete in-memory result.
+
+    Kept for library callers/tests; the CLI uses begin/checkpoint/complete so
+    long-running annotation work is durable as each batch validates.
+    """
     if len(result.annotations) != len(videos):
         raise ValueError("cannot store annotation run: annotation/video count mismatch")
-
-    provider_sha, input_sha, cache_key = annotation_cache_key(provider, prompt, videos)
-    evidence_by_id = {video.video_id: video for video in videos}
-    if len(evidence_by_id) != len(videos):
-        raise ValueError("cannot store annotation run with duplicate video IDs")
-
-    provider_config = {
-        "name": provider.name,
-        "preset": provider.preset,
-        "base_url": provider.base_url,
-        "model": provider.model,
-        "temperature": provider.temperature,
-        "max_tokens": provider.max_tokens,
-        "structured_mode": provider.structured_mode,
-        "extra": provider.extra,
-        "annotation_context": context or {},
-    }
-
-    with conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO llm_annotation_runs (
-                snapshot_id, selection_id, created_at, status,
-                provider_name, provider_preset, requested_model,
-                provider_sha256, prompt_sha256, input_sha256, cache_key,
-                interest_profile, taxonomy_source, taxonomy_json,
-                video_count, provider_config_json
-            ) VALUES (?, ?, ?, 'complete', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                snapshot_id,
-                selection_id,
-                _utc_now(),
-                provider.name,
-                provider.preset,
-                provider.model,
-                provider_sha,
-                prompt.sha256,
-                input_sha,
-                cache_key,
-                prompt.profile_name,
-                taxonomy_source,
-                json.dumps(prompt.categories, ensure_ascii=False, sort_keys=True),
-                len(videos),
-                json.dumps(provider_config, ensure_ascii=False, sort_keys=True),
-            ),
+    run_id = begin_annotation_run(
+        conn,
+        snapshot_id=snapshot_id,
+        selection_id=selection_id,
+        provider=provider,
+        prompt=prompt,
+        videos=videos,
+        taxonomy_source=taxonomy_source,
+        context=context,
+    )
+    offset = 0
+    for batch_index, batch in enumerate(result.batches):
+        batch_videos = videos[offset : offset + len(batch.annotations)]
+        store_annotation_batch(
+            conn,
+            run_id=run_id,
+            batch_index=batch_index,
+            videos=batch_videos,
+            result=batch,
         )
-        run_id = int(cursor.lastrowid)
-
-        for batch_index, batch in enumerate(result.batches):
-            batch_cursor = conn.execute(
-                """
-                INSERT INTO llm_annotation_batches (
-                    run_id, batch_index, input_sha256, response_model,
-                    usage_json, raw_response_json, validated_json
-                ) VALUES (?, ?, ?, ?, ?, '{}', ?)
-                """,
-                (
-                    run_id,
-                    batch_index,
-                    batch.input_sha256,
-                    batch.response_model,
-                    json.dumps(batch.usage, ensure_ascii=False, sort_keys=True),
-                    _validated_batch_json(batch.annotations),
-                ),
-            )
-            batch_id = int(batch_cursor.lastrowid)
-            for annotation in batch.annotations:
-                evidence = evidence_by_id[annotation.video_id]
-                conn.execute(
-                    """
-                    INSERT INTO llm_annotations (
-                        run_id, batch_id, video_id, playlist_position,
-                        evidence_sha256, evidence_json,
-                        primary_category, subject, tags_json,
-                        content_type, confidence, raw_result_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        run_id,
-                        batch_id,
-                        annotation.video_id,
-                        evidence.playlist_position,
-                        evidence_item_hash(evidence),
-                        json.dumps(
-                            evidence.as_payload(),
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                        annotation.primary_category,
-                        annotation.subject,
-                        json.dumps(list(annotation.tags), ensure_ascii=False),
-                        annotation.content_type,
-                        annotation.confidence,
-                        json.dumps(
-                            annotation.as_payload(),
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                    ),
-                )
+        offset += len(batch.annotations)
+    complete_annotation_run(conn, run_id)
     return run_id
 
 
