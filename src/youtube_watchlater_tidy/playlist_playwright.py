@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .browser_session import PlaywrightBrowserSession
 from .playlist_browser import BrowserPlaylist, BrowserPlaylistItem
 from .watchlater_browser import DEFAULT_BROWSER_PROFILE
 
@@ -53,6 +54,7 @@ class PlaywrightPlaylistClient:
         user_data_dir: str | Path = DEFAULT_BROWSER_PROFILE,
         headless: bool = False,
         channel: str | None = None,
+        cdp_endpoint: str | None = None,
         save_label: str = "Save",
         create_playlist_label: str = "New playlist",
         create_label: str = "Create",
@@ -66,23 +68,14 @@ class PlaywrightPlaylistClient:
             raise ValueError("scroll_pause cannot be negative")
         if stable_rounds < 1:
             raise ValueError("stable_rounds must be at least 1")
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError(
-                "browser execution support is not installed; run `pip install -e '.[browser]'` "
-                "and `playwright install chromium`"
-            ) from exc
-
-        self._pw = sync_playwright().start()
-        kwargs: dict[str, Any] = {
-            "user_data_dir": str(Path(user_data_dir)),
-            "headless": headless,
-        }
-        if channel:
-            kwargs["channel"] = channel
-        self._context = self._pw.chromium.launch_persistent_context(**kwargs)
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        self._session = PlaywrightBrowserSession(
+            user_data_dir=user_data_dir,
+            headless=headless,
+            channel=channel,
+            cdp_endpoint=cdp_endpoint,
+        )
+        self._context = self._session.context
+        self._page = self._session.page
         self.save_label = save_label
         self.create_playlist_label = create_playlist_label
         self.create_label = create_label
@@ -92,10 +85,7 @@ class PlaywrightPlaylistClient:
         self._known: dict[str, BrowserPlaylist] = {}
 
     def close(self) -> None:
-        try:
-            self._context.close()
-        finally:
-            self._pw.stop()
+        self._session.close()
 
     def _scroll_until_stable(self, selector: str) -> None:
         stable = 0

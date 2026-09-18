@@ -311,17 +311,20 @@ watchlater-playlist execute --run-id PLAN_ID --apply --max-writes 5
 
 ### Playwright backend
 
-Use the shared dedicated automation profile:
+For a fresh login, launch Chrome/Chromium yourself with a dedicated remote-debugging profile and authenticate manually:
 
 ```bash
-watchlater-playlist browser-login
+google-chrome \
+    --remote-debugging-port=9222 \
+    --user-data-dir="$HOME/.local/share/watchlater-chrome"
 ```
 
-Then apply cautiously:
+Then attach the executor to that already-authenticated browser:
 
 ```bash
 watchlater-playlist execute --run-id BROWSER_PLAN_ID \
-    --apply --max-writes 3
+    --apply --max-writes 3 \
+    --cdp-endpoint http://127.0.0.1:9222
 ```
 
 Both executors check live membership before insertion, checkpoint every destination separately, refuse stale decision-event IDs, and resume without repeating confirmed work. A secondary destination is valid because authorization is checked against the complete destination set on the exact current decision.
@@ -344,23 +347,27 @@ Planner-time inventory-only membership is never enough. If even one destination 
 
 Old removal plans become stale when the current decision event changes.
 
-## 10. Set up the shared Playwright profile
+## 10. Set up a manually authenticated browser session
 
-Destination-playlist and Watch Later browser executors intentionally share one dedicated automation profile:
+Google may block sign-in from a browser launched under automation. The recommended browser workflow therefore uses an ordinary Chrome/Chromium process that you start yourself with a dedicated profile and DevTools endpoint:
 
 ```bash
-watchlater-remove login
+google-chrome \
+    --remote-debugging-port=9222 \
+    --user-data-dir="$HOME/.local/share/watchlater-chrome"
+```
+
+Sign in to YouTube manually in that browser. Keep the remote-debugging profile separate from your normal browser profile.
+
+Optionally verify the attachment and navigate to Watch Later:
+
+```bash
+watchlater-remove login --cdp-endpoint http://127.0.0.1:9222
 # or
-watchlater-playlist browser-login
+watchlater-playlist browser-login --cdp-endpoint http://127.0.0.1:9222
 ```
 
-Default profile:
-
-```text
-.watchlater-playwright-profile/
-```
-
-It is ignored by Git. Sign in manually, then return to the terminal and press Enter to close it.
+The legacy `.watchlater-playwright-profile/` mode is retained for profiles that are already authenticated, but new Google logins should use the attached-browser flow.
 
 ## 11. Dry-run selective Watch Later execution
 
@@ -376,7 +383,8 @@ Real removal requires both explicit flags:
 
 ```bash
 watchlater-remove execute --run-id REMOVAL_PLAN_ID \
-    --apply --confirm-remove --max-deletes 3
+    --apply --confirm-remove --max-deletes 3 \
+    --cdp-endpoint http://127.0.0.1:9222
 ```
 
 The executor refuses stale plans, rechecks authorization immediately before browser work, finds rows by exact video ID, verifies identity before the destructive click, confirms disappearance, and checkpoints `removed`, `already_absent`, `not_found`, or `failed`.

@@ -118,10 +118,16 @@ class PlaylistPlaywrightTests(unittest.TestCase):
                     "0",
                     "--user-data-dir",
                     str(Path(self.tmp.name) / "profile"),
+                    "--cdp-endpoint",
+                    "http://127.0.0.1:9222",
                 ]
             )
         self.assertEqual(rc, 0)
         self.assertEqual(len(FakePlaywrightClient.instances), 1)
+        self.assertEqual(
+            FakePlaywrightClient.instances[0].kwargs["cdp_endpoint"],
+            "http://127.0.0.1:9222",
+        )
         self.assertTrue(FakePlaywrightClient.instances[0].closed)
 
     def test_stale_browser_plan_fails_before_client_construction(self) -> None:

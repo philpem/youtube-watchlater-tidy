@@ -124,18 +124,24 @@ A secondary destination on a multi-destination decision is valid because authori
 
 ## Playwright execution
 
+For new sign-ins, launch and authenticate Chrome/Chromium yourself, then attach Playwright over CDP rather than logging in inside a Playwright-launched browser:
+
 ```bash
 pip install -e '.[browser]'
-playwright install chromium
-watchlater-playlist browser-login
 
+google-chrome \
+    --remote-debugging-port=9222 \
+    --user-data-dir="$HOME/.local/share/watchlater-chrome"
+
+# after signing in manually in that browser:
 watchlater-playlist execute --run-id BROWSER_PLAN_ID \
-    --apply --max-writes 3
+    --apply --max-writes 3 \
+    --cdp-endpoint http://127.0.0.1:9222
 ```
 
-The Playwright backend uses the same checkpoint model. It discovers exact playlist IDs, verifies exact `v=VIDEO_ID` membership, creates/re-resolves missing destinations, confirms membership after Save actions, and fails rather than guessing on ambiguous identity. Headed mode is the default.
+The Playwright backend uses the same checkpoint model. It discovers exact playlist IDs, verifies exact `v=VIDEO_ID` membership, creates/re-resolves missing destinations, confirms membership after Save actions, and fails rather than guessing on ambiguous identity. The older Playwright-launched persistent-profile mode remains available for already-authenticated profiles when `--cdp-endpoint` is omitted.
 
-See [`playlist-browser.md`](playlist-browser.md) for browser-specific controls and identity checks.
+See [`playlist-browser.md`](playlist-browser.md) for browser-specific controls, authentication setup and identity checks.
 
 ## Write caps, resume and idempotence
 
