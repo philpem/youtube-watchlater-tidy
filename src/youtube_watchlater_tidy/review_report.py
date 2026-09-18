@@ -372,9 +372,16 @@ function populateTopics() {{
     const o=document.createElement('option'); o.value=t; o.textContent=t; topicFilterEl.append(o);
   }});
 }}
-function matches(r) {{
+function matchesBase(r) {{
   const q=searchEl.value.trim().toLowerCase();
-  if(q && ![r.video_id,r.original_title,r.recovered_title,r.dearrow_title,r.channel,...(r.recovered_video_links||[]).flatMap(x=>[x.service,x.title]),r.llm?.topic,r.llm?.reason].filter(Boolean).join(' ').toLowerCase().includes(q)) return false;
+  const annotation=r.annotation;
+  if(q && ![
+    r.video_id,r.original_title,r.recovered_title,r.dearrow_title,r.channel,
+    ...(r.recovered_video_links||[]).flatMap(x=>[x.service,x.title]),
+    r.llm?.topic,r.llm?.reason,
+    annotation?.primary_category,annotation?.subject,annotation?.content_type,
+    ...(annotation?.tags||[])
+  ].filter(Boolean).join(' ').toLowerCase().includes(q)) return false;
   const currentAction=r.current_decision?.action ?? 'unresolved';
   if(currentFilterEl.value && currentAction!==currentFilterEl.value) return false;
   const llmAction=r.llm?.action ?? 'none';
@@ -382,6 +389,46 @@ function matches(r) {{
   if(topicFilterEl.value && r.llm?.topic!==topicFilterEl.value) return false;
   if(confidenceEl.value!=='' && (confidence(r)==null || confidence(r)>Number(confidenceEl.value))) return false;
   return true;
+}}
+function matchesSemantic(r) {{
+  if(selectedCategories.size && !selectedCategories.has(r.annotation?.primary_category)) return false;
+  if(selectedTags.size && !(r.annotation?.tags||[]).some(tag=>selectedTags.has(tag))) return false;
+  return true;
+}}
+function matches(r) {{
+  return matchesBase(r) && matchesSemantic(r);
+}}
+function countValues(values) {{
+  const counts=new Map();
+  values.filter(Boolean).forEach(value=>counts.set(value,(counts.get(value)||0)+1));
+  return [...counts.entries()].sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]));
+}}
+function toggleFacet(set,value) {{
+  if(set.has(value)) set.delete(value); else set.add(value);
+  currentPage=1;
+  render();
+}}
+function bindFacetButtons(root) {{
+  root.querySelectorAll('.category-chip').forEach(button=>button.addEventListener('click',()=>toggleFacet(selectedCategories,button.dataset.category)));
+  root.querySelectorAll('.tag-chip').forEach(button=>button.addEventListener('click',()=>toggleFacet(selectedTags,button.dataset.tag)));
+}}
+function renderFacets() {{
+  const population=DATA.rows.filter(matchesBase);
+  const categories=countValues(population.map(r=>r.annotation?.primary_category));
+  const tags=countValues(population.flatMap(r=>r.annotation?.tags||[])).slice(0,30);
+  categoryFacetsEl.innerHTML=categories.length
+    ? categories.map(([name,count])=>'<button type="button" class="facet-chip category-chip '+(selectedCategories.has(name)?'active':'')+'" data-category="'+esc(name)+'">'+esc(name)+' <span class="small">'+count+'</span></button>').join('')
+    : '<span class="small">no semantic categories</span>';
+  tagFacetsEl.innerHTML=tags.length
+    ? tags.map(([tag,count])=>'<button type="button" class="facet-chip tag-chip '+(selectedTags.has(tag)?'active':'')+'" data-tag="'+esc(tag)+'">#'+esc(tag)+' <span class="small">'+count+'</span></button>').join('')
+    : '<span class="small">no semantic tags</span>';
+  bindFacetButtons(categoryFacetsEl);
+  bindFacetButtons(tagFacetsEl);
+  clearSemanticFiltersEl.disabled=selectedCategories.size===0 && selectedTags.size===0;
+  const parts=[];
+  if(selectedCategories.size) parts.push(selectedCategories.size+' categor'+(selectedCategories.size===1?'y':'ies')+' selected');
+  if(selectedTags.size) parts.push(selectedTags.size+' tag(s) selected');
+  semanticStatusEl.textContent=parts.join(' · ');
 }}
 function sorted(visible) {{
   const mode=sortEl.value;
