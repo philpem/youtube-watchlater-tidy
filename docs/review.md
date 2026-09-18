@@ -53,9 +53,9 @@ Recovered-video links are taken only from archive resources whose recovery metad
 
 ## Filter and sort
 
-The page supports free-text search, current-action filtering, LLM-action filtering, topic filtering, maximum LLM confidence, and position/confidence/view sorting.
+The page supports free-text search, current-action filtering, LLM-action filtering, topic filtering, maximum LLM confidence, and position/confidence/view sorting. Large result sets are paginated in the browser; the default is 100 rows per page and the page-size selector offers 50, 100, 250, or 500 rows.
 
-The confidence filter is useful for focusing on uncertain LLM results.
+Filtering and sorting apply to the complete report before pagination, and human overrides are retained while moving between pages. The confidence filter is useful for focusing on uncertain LLM results.
 
 ## Human overrides
 
