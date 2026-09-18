@@ -96,7 +96,33 @@ watchlater-llm --config watchlater.toml annotate \
     --taxonomy discover --taxonomy-sample 250 --max-categories 20
 ```
 
-Use `--dry-run` with configured categories to inspect the exact evidence, hashes and
+A successful discovery is saved immediately, before annotation batches begin, and the
+command prints the saved taxonomy ID to stderr. This means the vocabulary survives even
+if a later annotation batch fails or the run is interrupted.
+
+List saved taxonomies and inspect one in full:
+
+```bash
+watchlater-llm taxonomies
+watchlater-llm taxonomy --taxonomy-id 3
+```
+
+Reuse exactly that vocabulary on a later run without another taxonomy provider request:
+
+```bash
+watchlater-llm --config watchlater.toml annotate \
+    --scope all --taxonomy saved --taxonomy-id 3
+```
+
+Saved taxonomy provenance includes the source snapshot/selection, provider/model,
+discovery hashes, sample count and discovery limits. Reusing a saved taxonomy does not
+require the current snapshot to match the snapshot it was discovered from; the origin is
+recorded in the annotation-run context.
+
+`--no-store` keeps its existing meaning: a discovery made during a no-store run is not
+persisted.
+
+Use `--dry-run` with configured or saved categories to inspect the exact evidence, hashes and
 vocabulary without provider calls. With `--taxonomy discover --dry-run`, the command
 shows the discovery sample without calling the provider.
 

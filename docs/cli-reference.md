@@ -63,14 +63,16 @@ The default is `watchlater.sqlite3` in the current directory.
 watchlater-dearrow         fetch and inspect trusted alternate-title evidence
 watchlater-metadata        fetch richer yt-dlp metadata/descriptions
 watchlater-transcript      fetch and inspect existing caption evidence
-watchlater-llm             inspect providers; classify actions; annotate categories/tags; refine descriptions
+watchlater-llm             inspect providers; classify actions; annotate categories/tags; save/reuse taxonomies; refine descriptions
 watchlater-llm-transcript  perform transcript-aware classification refinement
 ```
 
 LLM commands require a project TOML configuration. `watchlater-llm annotate` stores
 semantic category/tag evidence separately from action classifications and supports
-`--scope all`, `--scope remaining`, configured vocabularies and optional taxonomy
-discovery. `watchlater-llm annotation-results` inspects a stored annotation run. See the
+`--scope all`, `--scope remaining`, configured vocabularies, taxonomy discovery and
+reuse of saved discovered taxonomies. `watchlater-llm taxonomies` lists saved
+vocabularies, `watchlater-llm taxonomy --taxonomy-id ID` inspects one, and
+`watchlater-llm annotation-results` inspects a stored annotation run. See the
 [provider guide](llm.md) and [classification guide](llm-classification.md).
 
 ## Human review

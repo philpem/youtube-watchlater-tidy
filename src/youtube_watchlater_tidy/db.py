@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -491,6 +491,32 @@ CREATE INDEX IF NOT EXISTS idx_llm_annotations_category
     ON llm_annotations(primary_category, video_id);
 """
 
+MIGRATION_8_TO_9 = """
+CREATE TABLE IF NOT EXISTS llm_taxonomies (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    selection_id INTEGER REFERENCES selections(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    provider_preset TEXT NOT NULL,
+    requested_model TEXT NOT NULL,
+    provider_sha256 TEXT NOT NULL,
+    interest_profile TEXT,
+    prompt_sha256 TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL,
+    sample_count INTEGER NOT NULL,
+    max_categories INTEGER NOT NULL,
+    categories_json TEXT NOT NULL,
+    usage_json TEXT NOT NULL,
+    response_model TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_taxonomies_snapshot
+    ON llm_taxonomies(snapshot_id, id);
+CREATE INDEX IF NOT EXISTS idx_llm_taxonomies_fingerprint
+    ON llm_taxonomies(provider_sha256, prompt_sha256, input_sha256, id);
+"""
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
@@ -526,6 +552,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(SCHEMA_SQL)
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
+            conn.executescript(MIGRATION_8_TO_9)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
 
@@ -538,7 +565,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
-            conn.execute("PRAGMA user_version = 8")
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
         return
 
     if version == 2:
@@ -549,7 +577,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
-            conn.execute("PRAGMA user_version = 8")
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
         return
 
     if version == 3:
@@ -559,7 +588,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
-            conn.execute("PRAGMA user_version = 8")
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
         return
 
     if version == 4:
@@ -568,7 +598,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
-            conn.execute("PRAGMA user_version = 8")
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
         return
 
     if version == 5:
@@ -576,20 +607,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(MIGRATION_5_TO_6)
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
-            conn.execute("PRAGMA user_version = 8")
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
         return
 
     if version == 6:
         with conn:
             conn.executescript(MIGRATION_6_TO_7)
             conn.executescript(MIGRATION_7_TO_8)
-            conn.execute("PRAGMA user_version = 8")
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
         return
 
     if version == 7:
         with conn:
             conn.executescript(MIGRATION_7_TO_8)
-            conn.execute("PRAGMA user_version = 8")
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
+        return
+
+    if version == 8:
+        with conn:
+            conn.executescript(MIGRATION_8_TO_9)
+            conn.execute("PRAGMA user_version = 9")
         return
 
     if version != SCHEMA_VERSION:
