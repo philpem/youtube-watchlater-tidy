@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
+from youtube_watchlater_tidy.llm_cli import main as llm_main
 from youtube_watchlater_tidy.llm_config import ProviderConfig, load_project_config
 from youtube_watchlater_tidy.llm_prompt import CLASSIFICATION_SCHEMA, render_prompt
-from youtube_watchlater_tidy.llm_provider import build_chat_request, chat, parse_json_content
+from youtube_watchlater_tidy.llm_provider import ChatResponse, build_chat_request, chat, parse_json_content
 
 
 class _FakeResponse:
@@ -176,6 +180,29 @@ guidance = "Prefer review when evidence is weak."
         self.assertEqual(seen["url"], "https://example.invalid/v1/chat/completions")
         self.assertEqual(parse_json_content(response, provider.name), {"ok": True})
         self.assertEqual(response.usage["prompt_tokens"], 12)
+
+    def test_cli_keyboard_interrupt_exits_130_without_traceback(self) -> None:
+        stderr = io.StringIO()
+        with patch(
+            "youtube_watchlater_tidy.llm_cli._cmd_annotate",
+            side_effect=KeyboardInterrupt,
+        ):
+            with redirect_stderr(stderr):
+                rc = llm_main(["annotate"])
+        self.assertEqual(rc, 130)
+        self.assertIn("watchlater-llm: interrupted", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_non_json_diagnostic_includes_finish_reason(self) -> None:
+        response = ChatResponse(
+            content='{"incomplete":',
+            usage={},
+            model="model-a",
+            raw={},
+            finish_reason="length",
+        )
+        with self.assertRaisesRegex(RuntimeError, "finish_reason='length'"):
+            parse_json_content(response, "test")
 
     def test_reserved_fields_cannot_be_overridden_by_extra(self) -> None:
         provider = ProviderConfig(

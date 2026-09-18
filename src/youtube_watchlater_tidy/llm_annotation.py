@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .llm_classification import ClassificationEvidence, evidence_hash
 from .llm_config import ProjectConfig, ProviderConfig
+from .llm_parallel import run_bounded_parallel
 from .llm_prompt import render_prompt
 from .llm_provider import ChatResponse, chat, parse_json_content
 from .progress import ProgressCallback, ProgressEvent
@@ -381,32 +381,20 @@ def _batches(
     return [videos[index : index + batch_size] for index in range(0, len(videos), batch_size)]
 
 
-def _annotate_batch(
+def _request_annotation_batch(
     provider: ProviderConfig,
     prompt: AnnotationPrompt,
     videos: list[ClassificationEvidence],
     progress: ProgressCallback | None,
     phase: str,
-) -> AnnotationBatchResult:
+) -> ChatResponse:
     chat_kwargs: dict[str, Any] = {"json_schema": prompt.schema()}
     if progress is not None:
         chat_kwargs.update({"progress": progress, "phase": phase})
-    response: ChatResponse = chat(
+    return chat(
         provider,
         build_annotation_messages(prompt, videos),
         **chat_kwargs,
-    )
-    value = parse_json_content(response, provider.name)
-    annotations = validate_annotation_response(
-        value,
-        expected_video_ids=[video.video_id for video in videos],
-        categories=set(prompt.categories),
-    )
-    return AnnotationBatchResult(
-        annotations=tuple(annotations),
-        input_sha256=evidence_hash(videos),
-        usage=response.usage,
-        response_model=response.model,
     )
 
 
@@ -437,61 +425,113 @@ def annotate(
                 ),
             )
         )
+        in_flight = min(provider.concurrency, len(batches))
+        queued = max(0, len(batches) - in_flight)
+        progress(
+            ProgressEvent(
+                phase=phase,
+                kind="status",
+                completed=0,
+                total=len(videos),
+                unit="video",
+                detail=(
+                    f"{in_flight} request(s) in flight; {queued} queued; "
+                    "waiting for first response"
+                ),
+            )
+        )
 
-    results: dict[int, AnnotationBatchResult] = {}
     completed_videos = 0
     completed_batches = 0
-    with ThreadPoolExecutor(max_workers=provider.concurrency) as executor:
-        futures = {
-            executor.submit(
-                _annotate_batch,
-                provider,
-                prompt,
-                batch,
-                progress,
-                phase,
-            ): index
-            for index, batch in enumerate(batches)
-        }
+    responses_received = 0
+
+    def request(index: int, batch: list[ClassificationEvidence]) -> ChatResponse:
+        return _request_annotation_batch(provider, prompt, batch, progress, phase)
+
+    def on_response(
+        index: int,
+        batch: list[ClassificationEvidence],
+        response: ChatResponse,
+    ) -> None:
+        nonlocal responses_received
+        responses_received += 1
         if progress is not None:
-            in_flight = min(provider.concurrency, len(batches))
-            queued = max(0, len(batches) - in_flight)
             progress(
                 ProgressEvent(
                     phase=phase,
                     kind="status",
-                    completed=0,
+                    completed=completed_videos,
                     total=len(videos),
                     unit="video",
                     detail=(
-                        f"{in_flight} request(s) in flight; {queued} queued; "
-                        "waiting for first completion"
+                        f"response {responses_received}/{len(batches)} received; "
+                        f"validating batch {index + 1}"
                     ),
                 )
             )
-        for future in as_completed(futures):
-            index = futures[future]
-            result = future.result()
-            results[index] = result
-            completed_videos += len(result.annotations)
-            completed_batches += 1
+
+    def consume(
+        index: int,
+        batch: list[ClassificationEvidence],
+        response: ChatResponse,
+    ) -> AnnotationBatchResult:
+        nonlocal completed_videos, completed_batches
+        try:
+            value = parse_json_content(response, provider.name)
+            annotations = validate_annotation_response(
+                value,
+                expected_video_ids=[video.video_id for video in batch],
+                categories=set(prompt.categories),
+            )
+        except (ValueError, RuntimeError) as exc:
             if progress is not None:
-                remaining_batches = len(batches) - completed_batches
-                in_flight = min(provider.concurrency, remaining_batches)
-                queued = max(0, remaining_batches - in_flight)
                 progress(
                     ProgressEvent(
                         phase=phase,
-                        kind="update",
+                        kind="message",
                         completed=completed_videos,
                         total=len(videos),
                         unit="video",
-                        detail=(
-                            f"{completed_batches}/{len(batches)} batches complete; "
-                            f"{in_flight} in flight; {queued} queued"
-                        ),
+                        detail=f"batch {index + 1} response failed validation: {exc}",
                     )
                 )
+            raise
+
+        result = AnnotationBatchResult(
+            annotations=tuple(annotations),
+            input_sha256=evidence_hash(batch),
+            usage=response.usage,
+            response_model=response.model,
+        )
+        completed_videos += len(result.annotations)
+        completed_batches += 1
+        if progress is not None:
+            remaining_batches = len(batches) - completed_batches
+            in_flight = min(provider.concurrency, remaining_batches)
+            queued = max(0, remaining_batches - in_flight)
+            progress(
+                ProgressEvent(
+                    phase=phase,
+                    kind="update",
+                    completed=completed_videos,
+                    total=len(videos),
+                    unit="video",
+                    detail=(
+                        f"{completed_batches}/{len(batches)} batches validated; "
+                        f"{in_flight} in flight; {queued} queued"
+                    ),
+                    counters={"responses": responses_received},
+                )
+            )
+        return result
+
+    results = run_bounded_parallel(
+        batches,
+        concurrency=provider.concurrency,
+        request=request,
+        consume=consume,
+        on_response=on_response,
+    )
 
     ordered_batches = tuple(results[index] for index in range(len(batches)))
     annotations = tuple(
@@ -506,10 +546,10 @@ def annotate(
                 total=len(videos),
                 unit="video",
                 detail=f"{len(batches)} batch(es) complete",
+                counters={"responses": responses_received},
             )
         )
     return AnnotationRunResult(annotations=annotations, batches=ordered_batches)
-
 
 def even_sample(
     videos: list[ClassificationEvidence],

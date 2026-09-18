@@ -210,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return _run(args)
+    except KeyboardInterrupt:
+        print("watchlater-llm-transcript: interrupted", file=sys.stderr)
+        return 130
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"watchlater-llm-transcript: error: {exc}", file=sys.stderr)
         return 2
