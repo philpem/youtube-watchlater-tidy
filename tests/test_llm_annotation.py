@@ -375,6 +375,97 @@ Telecoms = "Telephony, radio, networking and modems."
         self.assertEqual(events[-1].kind, "finish")
         self.assertEqual(events[-1].completed, 4)
 
+    def test_content_filter_splits_batch_and_marks_isolated_video_unclear(self) -> None:
+        with open_catalogue(self.db_path) as conn:
+            videos = classification_evidence(
+                conn,
+                self.snapshot,
+                include_decided=False,
+            )
+
+        self.assertEqual(len(videos), 2)
+        filtered_id = videos[1].video_id
+        calls: list[list[str]] = []
+
+        def fake_chat(provider, messages, json_schema=None, **kwargs):
+            batch = json.loads(messages[-1]["content"].split("\n", 1)[1])["videos"]
+            video_ids = [row["video_id"] for row in batch]
+            calls.append(video_ids)
+            usage = {"prompt_tokens": len(calls)}
+
+            if filtered_id in video_ids:
+                return ChatResponse(
+                    content="",
+                    usage=usage,
+                    model="model-a",
+                    raw={},
+                    finish_reason="content_filter",
+                )
+
+            video_id = video_ids[0]
+            return ChatResponse(
+                content=json.dumps(
+                    {
+                        "annotations": [
+                            {
+                                "video_id": video_id,
+                                "primary_category": "Retrocomputing",
+                                "subject": "subject " + video_id,
+                                "tags": ["retrocomputing"],
+                                "content_type": "technical",
+                                "confidence": 0.8,
+                            }
+                        ]
+                    }
+                ),
+                usage=usage,
+                model="model-a",
+                raw={},
+                finish_reason="stop",
+            )
+
+        events = []
+        with patch("youtube_watchlater_tidy.llm_annotation.chat", side_effect=fake_chat):
+            result = annotate(
+                self.provider,
+                self.prompt,
+                videos,
+                batch_size=2,
+                progress=events.append,
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                [videos[0].video_id, videos[1].video_id],
+                [videos[0].video_id],
+                [videos[1].video_id],
+            ],
+        )
+        self.assertEqual([item.video_id for item in result.annotations], [v.video_id for v in videos])
+        self.assertEqual(result.annotations[0].primary_category, "Retrocomputing")
+        fallback = result.annotations[1]
+        self.assertEqual(fallback.video_id, filtered_id)
+        self.assertEqual(fallback.primary_category, "Unclear")
+        self.assertEqual(fallback.tags, ("content-filtered",))
+        self.assertEqual(fallback.content_type, "unclassified")
+        self.assertEqual(fallback.confidence, 0.0)
+        self.assertIn("manual review required", fallback.subject)
+        self.assertEqual(result.batches[0].usage["prompt_tokens"], 6)
+
+        messages = [event.detail or "" for event in events if event.kind == "message"]
+        self.assertTrue(
+            any(
+                "provider content filter; retrying 2 videos as 1 + 1" in message
+                for message in messages
+            )
+        )
+        self.assertTrue(
+            any("recording Unclear fallback for manual review" in message for message in messages)
+        )
+        self.assertEqual(events[-1].kind, "finish")
+        self.assertEqual(events[-1].completed, 2)
+
     def test_single_video_annotation_truncation_is_actionable(self) -> None:
         video = ClassificationEvidence(
             video_id="video00000A",

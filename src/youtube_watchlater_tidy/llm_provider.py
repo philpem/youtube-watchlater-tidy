@@ -132,10 +132,10 @@ def _message_text_content(
             f"provider {provider.name!r} refused the request: {refusal.strip()[:500]}"
         )
 
-    # Some reasoning/provider implementations return no visible content when the
-    # completion exhausts its output budget. Preserve that finish reason so the
-    # caller can use its adaptive batch-splitting recovery.
-    if content is None and finish_reason == "length":
+    # Some provider outcomes intentionally return no visible content. Preserve
+    # the finish reason so callers can apply outcome-specific recovery instead
+    # of failing here before they can inspect it.
+    if content is None and finish_reason in {"length", "content_filter"}:
         return ""
 
     model_detail = f"; model={response_model!r}" if response_model else ""
