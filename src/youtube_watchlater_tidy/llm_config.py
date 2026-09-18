@@ -72,6 +72,7 @@ class ProjectConfig:
     providers: dict[str, ProviderConfig]
     interest_profiles: dict[str, InterestProfile]
     playlists: dict[str, str]
+    review_categories: dict[str, str] = field(default_factory=dict)
 
     def provider(self, name: str | None = None) -> ProviderConfig:
         selected = name or self.default_provider
@@ -222,6 +223,33 @@ def load_project_config(path: str | Path) -> ProjectConfig:
                 f"playlists.{name} must be a description string or table with description"
             )
 
+    llm_rows = _table(data, "llm")
+    review_category_rows = _table(llm_rows, "review_categories")
+    review_categories: dict[str, str] = {}
+    seen_review_categories: set[str] = set()
+    for name, value in review_category_rows.items():
+        category_name = str(name).strip()
+        if not category_name:
+            raise ValueError("llm.review_categories names must be non-empty")
+        folded = category_name.casefold()
+        if folded in seen_review_categories:
+            raise ValueError(f"duplicate llm.review_categories entry {category_name!r}")
+        seen_review_categories.add(folded)
+        if isinstance(value, str):
+            description = value.strip()
+        elif isinstance(value, dict) and isinstance(value.get("description"), str):
+            description = str(value["description"]).strip()
+        else:
+            raise ValueError(
+                f"llm.review_categories.{name} must be a description string "
+                "or table with description"
+            )
+        if not description:
+            raise ValueError(
+                f"llm.review_categories.{name} description must be non-empty"
+            )
+        review_categories[category_name] = description
+
     default_provider = data.get("default_provider")
     if default_provider is not None and not isinstance(default_provider, str):
         raise ValueError("default_provider must be a string")
@@ -236,6 +264,7 @@ def load_project_config(path: str | Path) -> ProjectConfig:
         providers=providers,
         interest_profiles=interest_profiles,
         playlists=playlists,
+        review_categories=review_categories,
     )
     if default_provider is not None:
         result.provider()
