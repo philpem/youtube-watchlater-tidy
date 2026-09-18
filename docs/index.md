@@ -209,6 +209,19 @@ watchlater-llm --config watchlater.toml classify \
 
 LLM results are append-only advisory evidence and are cached by provider/prompt/evidence.
 
+For human review, a separate semantic pass can categorise the entire snapshot (including
+videos which already have decisions) without changing those decisions. Define stable broad
+categories under `[llm.review_categories]` in `watchlater.toml`, then run:
+
+```bash
+watchlater-llm --config watchlater.toml annotate --scope all
+```
+
+Use `--scope remaining` for unresolved videos only, or `--taxonomy discover` to have the
+provider propose a fixed broad vocabulary from a catalogue sample. The annotation records
+one category, a specific subject, reusable tags, content type and confidence separately
+from the action suggestion.
+
 ## 6. Description and transcript escalation
 
 For a run that requested descriptions:
@@ -238,7 +251,10 @@ watchlater-review build review.html
 firefox review.html
 ```
 
-The page shows catalogue metadata, the **current decision**, and the latest stored **LLM suggestion** in separate columns.
+The page shows catalogue metadata, the **current decision**, the latest semantic
+**category/subject/tags**, and the latest stored **LLM action suggestion** without treating
+either automated result as a human decision. Category and top-tag counts are clickable
+facets for browsing large cohorts before making overrides.
 
 ### Manual overrides
 
@@ -457,8 +473,9 @@ watchlater recover --unavailable --limit 20
 watchlater creators --remaining
 watchlater keywords --remaining --ngram 2 --min-count 3
 
-# semantic pass as needed
+# semantic/action passes as needed
 watchlater-dearrow enrich --all --remaining
+watchlater-llm --config watchlater.toml annotate --provider ollama-local --scope all
 watchlater-llm --config watchlater.toml classify --provider ollama-local --limit 20
 
 # review
