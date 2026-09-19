@@ -16,7 +16,6 @@ from .watchlater_removal import (
     finish_removal_run,
     pending_removal_items,
     removal_item_is_authorized,
-    removal_plan_payload,
 )
 
 WATCH_LATER_URL = "https://www.youtube.com/playlist?list=WL"
