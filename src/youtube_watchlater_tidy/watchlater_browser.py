@@ -16,7 +16,6 @@ from .watchlater_removal import (
     finish_removal_run,
     pending_removal_items,
     removal_item_is_authorized,
-    removal_plan_payload,
 )
 
 WATCH_LATER_URL = "https://www.youtube.com/playlist?list=WL"
@@ -415,16 +414,14 @@ def execute_removal_plan(
     if backoff < 0:
         raise ValueError("--backoff cannot be negative")
 
-    payload = removal_plan_payload(conn, run_id)
-    stale = int(payload["stale_item_count"])
     if apply and not confirmed:
         raise ValueError("destructive Watch Later removal requires both --apply and --confirm-remove")
-    if apply and stale:
-        raise ValueError(
-            f"Watch Later removal plan {run_id} contains {stale} stale item(s); create a fresh plan"
-        )
 
     run, pending = pending_removal_items(conn, run_id)
+    authorized_pending = [
+        item for item in pending if removal_item_is_authorized(conn, run, item)
+    ]
+    stale = len(pending) - len(authorized_pending)
     if not apply:
         return BrowserRemovalResult(
             run_id=run_id,
@@ -444,7 +441,8 @@ def execute_removal_plan(
     with conn:
         conn.execute("UPDATE watchlater_removal_runs SET status = 'running' WHERE id = ?", (run_id,))
 
-    removed = absent = not_found = failed = stale_runtime = destructive = 0
+    removed = absent = not_found = failed = destructive = 0
+    stale_runtime = stale
     completed_items = 0
 
     if progress_events is not None:
@@ -453,7 +451,7 @@ def execute_removal_plan(
                 phase=phase,
                 kind="start",
                 completed=0,
-                total=len(pending),
+                total=len(authorized_pending),
                 unit="video",
                 detail=f"run {run_id}",
             )
@@ -468,7 +466,7 @@ def execute_removal_plan(
                     phase=phase,
                     kind="update",
                     completed=completed_items,
-                    total=len(pending),
+                    total=len(authorized_pending),
                     unit="video",
                     detail=detail,
                     counters={
@@ -584,10 +582,16 @@ def execute_removal_plan(
             emit(f"Not found {video_id}; left retriable")
         mark_processed(video_id)
 
+    if stale:
+        emit(
+            f"Skipping {stale} stale pending removal decision(s); "
+            "still-current items will continue"
+        )
+
     scan_matching = getattr(client, "scan_matching_videos", None)
     remove_loaded = getattr(client, "remove_loaded_video", None)
-    if callable(scan_matching) and callable(remove_loaded):
-        items_by_video = {str(item["video_id"]): item for item in pending}
+    if authorized_pending and callable(scan_matching) and callable(remove_loaded):
+        items_by_video = {str(item["video_id"]): item for item in authorized_pending}
         for event in scan_matching(set(items_by_video)):
             if event.kind == "candidate":
                 if max_deletes is not None and destructive >= max_deletes:
@@ -612,6 +616,7 @@ def execute_removal_plan(
                     raise RuntimeError("browser scan returned an unknown unresolved video ID")
                 if not removal_item_is_authorized(conn, run, item):
                     stale_runtime += 1
+                    mark_processed("stale decision")
                     continue
                 checkpoint_removal(
                     conn,
@@ -626,8 +631,8 @@ def execute_removal_plan(
                     not_found += 1
                 mark_processed(video_id)
             break
-    else:
-        for item in pending:
+    elif authorized_pending:
+        for item in authorized_pending:
             if max_deletes is not None and destructive >= max_deletes:
                 break
             process_candidate(item, client.remove_video)
@@ -639,7 +644,7 @@ def execute_removal_plan(
                 phase=phase,
                 kind="finish",
                 completed=completed_items,
-                total=len(pending),
+                total=len(authorized_pending),
                 unit="video",
                 detail=f"status={status} remaining={remaining}",
             )

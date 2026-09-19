@@ -106,8 +106,10 @@ Then follow [Selective Watch Later removal](watchlater-removal.md) to dry-run an
 ## A plan is stale
 
 Plans bind every item to the exact current decision event. Changing an action or destination
-after planning intentionally makes the old item stale. Do not force it; create and review a
-new plan.
+after planning intentionally makes the old item stale. Execution skips stale pending items
+and continues with still-current items; it never uses the stale authorization for a destructive
+click. Completed `removed` / `already_absent` checkpoints do not block resume. If a stale
+pending item still needs action, create and review a fresh plan for it.
 
 ## Playlist title is ambiguous
 
