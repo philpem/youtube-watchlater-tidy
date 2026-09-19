@@ -128,15 +128,9 @@ def _cmd_execute(args: argparse.Namespace) -> int:
     try:
         with open_catalogue(args.db) as conn:
             run_id = _resolve_run_id(conn, args)
-            preflight = removal_plan_payload(conn, run_id)
             if args.apply and not args.confirm_remove:
                 raise ValueError(
                     "destructive Watch Later removal requires both --apply and --confirm-remove"
-                )
-            if args.apply and int(preflight["stale_item_count"]):
-                raise ValueError(
-                    f"Watch Later removal plan {run_id} contains "
-                    f"{preflight['stale_item_count']} stale item(s); create a fresh plan"
                 )
 
             if args.apply:
