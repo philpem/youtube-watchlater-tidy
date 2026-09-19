@@ -71,7 +71,7 @@ If the current decision changes since planning, the item is reported with:
 "stale": true
 ```
 
-The executor refuses a plan containing stale items before opening a destructive run and rechecks authorization immediately before each browser attempt.
+Stale items are never authorized for removal. During execution, stale pending items are skipped while still-current items in the same plan continue, and authorization is rechecked immediately before each browser attempt. Completed `removed` / `already_absent` checkpoints are terminal, so they cannot block a later resume merely because their old decision event is now stale. A run with skipped stale pending items remains partial; create a fresh plan if those items still need action.
 
 ## Install Playwright support and authenticate outside automation
 
