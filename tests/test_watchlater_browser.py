@@ -389,20 +389,76 @@ class WatchLaterBrowserExecutorTests(unittest.TestCase):
         self.assertEqual(fake.calls, ["video00000A", "video00000B", "video00000C"])
         self.assertEqual(second.run_status, "complete")
 
-    def test_stale_plan_refuses_before_browser_call(self) -> None:
-        fake = FakeBrowser({"video00000A": "removed"})
+    def test_stale_pending_item_is_skipped_while_current_items_continue(self) -> None:
+        fake = FakeBrowser(
+            {
+                "video00000A": "removed",
+                "video00000B": "removed",
+                "video00000C": "removed",
+            }
+        )
         with open_catalogue(self.db_path) as conn:
             selection = select_title(conn, contains="Delete A", snapshot_id=self.snapshot)
             apply_selection_action(conn, "keep", selection_id=selection.selection_id)
-            with self.assertRaisesRegex(ValueError, "stale"):
-                execute_removal_plan(
-                    conn,
-                    self.plan.run_id,
-                    client=fake,
-                    apply=True,
-                    confirmed=True,
-                )
-        self.assertEqual(fake.calls, [])
+            result = execute_removal_plan(
+                conn,
+                self.plan.run_id,
+                client=fake,
+                apply=True,
+                confirmed=True,
+                retries=0,
+                interval=0,
+                backoff=0,
+            )
+            payload = removal_plan_payload(conn, self.plan.run_id)
+
+        self.assertEqual(fake.calls, ["video00000B", "video00000C"])
+        self.assertEqual(result.stale, 1)
+        self.assertEqual(result.removed, 2)
+        self.assertEqual(result.run_status, "partial")
+        stale_item = next(row for row in payload["items"] if row["video_id"] == "video00000A")
+        self.assertEqual(stale_item["status"], "planned")
+        self.assertTrue(stale_item["stale"])
+
+    def test_terminal_stale_checkpoint_does_not_block_resume(self) -> None:
+        fake = FakeBrowser(
+            {
+                "video00000A": "removed",
+                "video00000B": "removed",
+                "video00000C": "removed",
+            }
+        )
+        with open_catalogue(self.db_path) as conn:
+            first = execute_removal_plan(
+                conn,
+                self.plan.run_id,
+                client=fake,
+                apply=True,
+                confirmed=True,
+                max_deletes=1,
+                retries=0,
+                interval=0,
+                backoff=0,
+            )
+            selection = select_title(conn, contains="Delete A", snapshot_id=self.snapshot)
+            apply_selection_action(conn, "keep", selection_id=selection.selection_id)
+            second = execute_removal_plan(
+                conn,
+                self.plan.run_id,
+                client=fake,
+                apply=True,
+                confirmed=True,
+                max_deletes=10,
+                retries=0,
+                interval=0,
+                backoff=0,
+            )
+
+        self.assertEqual(first.removed, 1)
+        self.assertEqual(second.stale, 0)
+        self.assertEqual(second.removed, 2)
+        self.assertEqual(fake.calls, ["video00000A", "video00000B", "video00000C"])
+        self.assertEqual(second.run_status, "complete")
 
     def test_exception_is_checkpointed_failed_after_retries(self) -> None:
         fake = FakeBrowser({"video00000A": "raise", "video00000B": "already_absent", "video00000C": "already_absent"})
